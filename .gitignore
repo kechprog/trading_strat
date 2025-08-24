@@ -5,3 +5,6 @@ raw_data
 .vscode
 .claude
 .env
+trades_log.txt
+convert_hist_raw.log
+CLAUDE.md

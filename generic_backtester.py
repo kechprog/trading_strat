@@ -178,8 +178,10 @@ class GenericBacktester:
             # Run backtest
             engine.run()
             
-            # Extract performance metrics
-            return self._extract_performance_metrics(engine, strategy_name)
+            # Extract performance metrics and include engine reference
+            metrics = self._extract_performance_metrics(engine, strategy_name)
+            metrics['engine'] = engine  # Add engine reference for trade extraction
+            return metrics
             
         except Exception as e:
             logger.error(f"Error running strategy {strategy_name}: {e}")
