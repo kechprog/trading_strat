@@ -1,0 +1,15 @@
+# Nautilus Trader and core dependencies
+nautilus_trader
+pandas
+pyarrow
+numpy
+
+# Date/time handling
+pytz
+
+# System and utility
+pathlib2
+
+# API and environment handling
+requests
+python-dotenv

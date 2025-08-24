@@ -1,0 +1,7 @@
+__pycache__
+indicators/__pycache__
+nautilus_catalog
+raw_data
+.vscode
+.claude
+.env
