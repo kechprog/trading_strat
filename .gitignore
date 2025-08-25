@@ -8,3 +8,4 @@ raw_data
 trades_log.txt
 convert_hist_raw.log
 CLAUDE.md
+pnl_over_time.csv

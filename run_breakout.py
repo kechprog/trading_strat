@@ -6,6 +6,7 @@ Run the breakout strategy using the generic backtester.
 from pathlib import Path
 from datetime import datetime
 import pytz
+import pandas as pd
 
 from generic_backtester import GenericBacktester
 from breakout import BreakoutStrategy
@@ -13,60 +14,102 @@ from indicators.momentum_mean_reversion_indicator import MomentumMeanReversionIn
 from nautilus_trader.model.enums import OrderStatus
 
 
-def export_trades_to_log(engine, filename="trades_log.txt"):
+def export_pnl_over_time(engine, filename="pnl_over_time.csv", initial_capital=100000):
     """
-    Extract filled orders from the engine cache and export to a log file.
+    Calculate and export P&L over time from the backtest results.
     
     Args:
         engine: The BacktestEngine instance
-        filename: Output filename for the trades log
+        filename: Output filename for the P&L CSV
+        initial_capital: Starting capital for P&L calculation
     """
-    # Get all orders from the cache
+    # Get all filled orders
     orders = engine.kernel.cache.orders()
-    
-    # Filter for filled orders only
     filled_orders = [o for o in orders if o.status == OrderStatus.FILLED]
-    
-    # Sort by timestamp
     filled_orders.sort(key=lambda x: x.ts_last)
     
-    # Format and write to file
-    with open(filename, 'w') as f:
-        f.write("# Trading Log\n")
-        f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write("#\n")
-        f.write("# Format: DATE TIME SIDE SYMBOL@PRICE x QUANTITY\n")
-        f.write("#" + "="*70 + "\n\n")
+    if not filled_orders:
+        print("No filled orders to calculate P&L")
+        return
+    
+    # Track positions and P&L
+    position_voo = 0
+    position_sh = 0
+    voo_avg_price = 0
+    sh_avg_price = 0
+    cash = initial_capital
+    pnl_history = []
+    
+    for order in filled_orders:
+        # Convert timestamp
+        ts_seconds = order.ts_last / 1_000_000_000
+        trade_time = datetime.fromtimestamp(ts_seconds, tz=pytz.UTC)
         
-        for order in filled_orders:
-            # Convert nanosecond timestamp to datetime
-            ts_seconds = order.ts_last / 1_000_000_000
-            trade_time = datetime.fromtimestamp(ts_seconds, tz=pytz.UTC)
-            
-            # Format the trade entry
-            date_str = trade_time.strftime('%Y-%m-%d')
-            time_str = trade_time.strftime('%H:%M:%S')
-            side = order.side.name  # BUY or SELL
-            symbol = str(order.instrument_id.symbol)
-            
-            # Get the fill price (avg_px is the average fill price)
-            price = order.avg_px if order.avg_px else 0.0
-            quantity = int(order.quantity)
-            
-            # Write formatted trade
-            trade_line = f"{date_str} {time_str} {side} {symbol}@{price:.2f} x {quantity}"
-            f.write(trade_line + "\n")
+        symbol = str(order.instrument_id.symbol)
+        side = order.side.name
+        quantity = int(order.quantity)
+        price = float(order.avg_px) if order.avg_px else 0.0
         
-        # Add summary at the end
-        f.write("\n" + "#"*70 + "\n")
-        f.write(f"# Total Trades: {len(filled_orders)}\n")
+        # Calculate P&L and update positions
+        if symbol == "VOO":
+            if side == "BUY":
+                # Buying VOO
+                position_voo += quantity
+                voo_avg_price = price
+                cash -= quantity * price
+            else:  # SELL
+                # Selling VOO
+                if position_voo > 0:
+                    realized_pnl = quantity * (price - voo_avg_price)
+                    cash += quantity * price
+                    position_voo -= quantity
+                    if position_voo == 0:
+                        voo_avg_price = 0
         
-        # Count buy/sell orders
-        buy_orders = len([o for o in filled_orders if o.side.name == 'BUY'])
-        sell_orders = len([o for o in filled_orders if o.side.name == 'SELL'])
+        elif symbol == "SH":
+            if side == "BUY":
+                # Buying SH (going short)
+                position_sh += quantity
+                sh_avg_price = price
+                cash -= quantity * price
+            else:  # SELL
+                # Selling SH (exiting short)
+                if position_sh > 0:
+                    realized_pnl = quantity * (price - sh_avg_price)
+                    cash += quantity * price
+                    position_sh -= quantity
+                    if position_sh == 0:
+                        sh_avg_price = 0
         
-        f.write(f"# Buy Orders: {buy_orders}\n")
-        f.write(f"# Sell Orders: {sell_orders}\n")
+        # Calculate total equity (cash + value of positions)
+        # For this we'd need current prices, but we'll use last trade prices as approximation
+        voo_value = position_voo * voo_avg_price if position_voo > 0 else 0
+        sh_value = position_sh * sh_avg_price if position_sh > 0 else 0
+        total_equity = cash + voo_value + sh_value
+        
+        pnl_history.append({
+            'datetime': trade_time,
+            'symbol': symbol,
+            'side': side,
+            'quantity': quantity,
+            'price': price,
+            'cash': cash,
+            'position_voo': position_voo,
+            'position_sh': position_sh,
+            'total_equity': total_equity,
+            'pnl': total_equity - initial_capital,
+            'pnl_pct': ((total_equity - initial_capital) / initial_capital) * 100
+        })
+    
+    # Convert to DataFrame and save
+    df = pd.DataFrame(pnl_history)
+    df.to_csv(filename, index=False)
+    
+    print(f"P&L over time exported to {filename}")
+    print(f"Final P&L: ${df.iloc[-1]['pnl']:,.2f} ({df.iloc[-1]['pnl_pct']:.2f}%)")
+    
+    return df
+
 
 
 def main():
@@ -76,7 +119,7 @@ def main():
     
     # Set date range
     backtester.set_date_range(
-        start_date=datetime(2020, 1, 1, tzinfo=pytz.UTC),
+        start_date=datetime(2014, 1, 1, tzinfo=pytz.UTC),
         end_date=datetime(2025, 1, 1, tzinfo=pytz.UTC)
     )
     
@@ -85,9 +128,16 @@ def main():
     
     # Create indicator
     indicator = MomentumMeanReversionIndicator()
+
+    config = {
+        'long_entry_lookback': 4,
+        'long_exit_lookback': 7,
+        'short_entry_lookback': 4,
+        'short_exit_lookback': 7,
+    }
     
     # Create strategy with indicator
-    strategy = BreakoutStrategy(indicator)
+    strategy = BreakoutStrategy(indicator, config)
     
     # Run backtest
     print("Running breakout strategy backtest...")
@@ -105,10 +155,9 @@ def main():
         print(f"  Sell Orders: {results['sell_orders']}")
         print(f"  Complete Trades: {results['trades']}")
         
-        # Extract and export trades
+        # Export P&L over time
         if 'engine' in results:
-            export_trades_to_log(results['engine'], "trades_log.txt")
-            print(f"\nTrades exported to trades_log.txt")
+            export_pnl_over_time(results['engine'], "pnl_over_time.csv", initial_capital=100_000)
     else:
         print(f"Backtest failed: {results.get('error', 'Unknown error')}")
 

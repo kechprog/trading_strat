@@ -80,6 +80,8 @@ class BreakoutStrategy(Strategy):
         self.neutral_threshold = config.get('neutral_threshold', 1e-10)
         self.trade_size_pct = config.get('trade_size_pct', 1.0)  # Use 100% of available capital
         self.min_trade_size = config.get('min_trade_size', 1)  # Minimum shares
+        self.use_fixed_capital = config.get('use_fixed_capital', True)  # Cap position size at starting capital
+        self.starting_capital = 100000.0  # Initial capital (will be set from actual balance)
         
         # Store the pluggable indicator
         self.indicator = indicator
@@ -102,6 +104,7 @@ class BreakoutStrategy(Strategy):
         logger.info(f"  Short exit lookback: {self.short_exit_lookback}")
         logger.info(f"  Neutral threshold: {self.neutral_threshold}")
         logger.info(f"  Trade size: {self.trade_size_pct*100:.0f}% of available capital")
+        logger.info(f"  Fixed capital mode: {self.use_fixed_capital} (caps position size at starting capital)")
         
         # Subscribe to both minute and daily bar data for all available instruments  
         for instrument in self.cache.instruments():
@@ -120,6 +123,11 @@ class BreakoutStrategy(Strategy):
             if symbol == "VOO":
                 self.voo_instrument = instrument.id
                 logger.info(f"VOO instrument identified: {self.voo_instrument}")
+                
+                # Note: Historical data will be loaded through regular on_bar callbacks
+                # The strategy will accumulate data as bars arrive
+                logger.info(f"VOO instrument ready for trading")
+                
             elif symbol == "SH":
                 self.sh_instrument = instrument.id
                 logger.info(f"SH instrument identified: {self.sh_instrument}")
@@ -286,7 +294,7 @@ class BreakoutStrategy(Strategy):
                     self._execute_market_buy_sh_entry()
     
     def _calculate_position_size(self, price: float) -> int:
-        """Calculate position size using all available capital."""
+        """Calculate position size using at most the starting capital."""
         # Get available cash balance
         accounts = self.cache.accounts()
         if not accounts:
@@ -297,13 +305,21 @@ class BreakoutStrategy(Strategy):
         account = accounts[0]
         available_balance = account.balance_total().as_double()
         
-        # Use all available capital
-        shares = int(available_balance / price)
+        # Set starting capital on first trade
+        if self.starting_capital == 100000.0:  # Default value, not yet set
+            self.starting_capital = available_balance
+            logger.info(f"Starting capital set to: ${self.starting_capital:.2f}")
+        
+        # Use at most the starting capital, or whatever is available if less
+        capital_to_use = min(available_balance, self.starting_capital) if self.use_fixed_capital else available_balance
+        
+        # Calculate shares based on capital to use
+        shares = int(capital_to_use / price)
         
         # Ensure minimum trade size
         shares = max(shares, self.min_trade_size)
         
-        logger.info(f"Position sizing: balance=${available_balance:.2f}, price=${price:.2f}, shares={shares} (${shares*price:.2f})")
+        logger.info(f"Position sizing: balance=${available_balance:.2f}, using=${capital_to_use:.2f}, price=${price:.2f}, shares={shares} (${shares*price:.2f})")
         return shares
 
     def _execute_market_buy_voo_entry(self):
