@@ -69,6 +69,10 @@ class BreakoutStrategy(Strategy):
         self._daily_highs = []
         self._daily_lows = []
         
+        # Historical hourly data for EMA indicator
+        self._hourly_closes = []
+        self._hourly_volumes = []
+        
         # Strategy parameters (configurable)
         config = config or {}
         
@@ -106,12 +110,17 @@ class BreakoutStrategy(Strategy):
         logger.info(f"  Trade size: {self.trade_size_pct*100:.0f}% of available capital")
         logger.info(f"  Fixed capital mode: {self.use_fixed_capital} (caps position size at starting capital)")
         
-        # Subscribe to both minute and daily bar data for all available instruments  
+        # Subscribe to minute, hourly, and daily bar data for all available instruments  
         for instrument in self.cache.instruments():
             # Subscribe to daily bars for indicator calculation
             daily_bar_type = BarType.from_str(f"{instrument.id}-1-DAY-LAST-EXTERNAL")
             logger.info(f"Subscribing to daily bars: {daily_bar_type}")
             self.subscribe_bars(daily_bar_type)
+            
+            # Subscribe to hourly bars for EMA indicator
+            hourly_bar_type = BarType.from_str(f"{instrument.id}-1-HOUR-LAST-EXTERNAL")
+            logger.info(f"Subscribing to hourly bars: {hourly_bar_type}")
+            self.subscribe_bars(hourly_bar_type)
             
             # Subscribe to minute bars for trade execution
             minute_bar_type = BarType.from_str(f"{instrument.id}-1-MINUTE-LAST-EXTERNAL")
@@ -133,16 +142,47 @@ class BreakoutStrategy(Strategy):
                 logger.info(f"SH instrument identified: {self.sh_instrument}")
     
     def on_bar(self, bar: Bar):
-        """Handle both minute and daily bar data."""
-        # Determine if this is a daily or minute bar
-        is_daily_bar = "DAY" in str(bar.bar_type)
+        """Handle minute, hourly, and daily bar data."""
+        # Determine bar type
+        bar_type_str = str(bar.bar_type)
+        is_daily_bar = "DAY" in bar_type_str
+        is_hourly_bar = "HOUR" in bar_type_str
         
         if is_daily_bar:
             # Handle daily bar for indicator calculation
             self._on_daily_bar(bar)
+        elif is_hourly_bar:
+            # Handle hourly bar for EMA indicator
+            self._on_hourly_bar(bar)
         else:
             # Handle minute bar for trade execution
             self._on_minute_bar(bar)
+    
+    def _on_hourly_bar(self, bar: Bar):
+        """Handle hourly bar data for EMA indicator calculation."""
+        # Only process VOO bars for indicator calculation
+        if str(bar.bar_type.instrument_id.symbol) != "VOO":
+            return
+        
+        # Store hourly bar data
+        self._hourly_closes.append(float(bar.close))
+        self._hourly_volumes.append(float(bar.volume))
+        
+        # Keep only necessary history (50 hours for EMA + buffer)
+        max_hourly_history = 100  # 50 for EMA + 50 buffer
+        if len(self._hourly_closes) > max_hourly_history:
+            self._hourly_closes = self._hourly_closes[-max_hourly_history:]
+            self._hourly_volumes = self._hourly_volumes[-max_hourly_history:]
+        
+        # If using EMA indicator, calculate signals with hourly data
+        if hasattr(self.indicator, '__class__') and self.indicator.__class__.__name__ == 'EMAIndicator':
+            # Calculate indicator value with hourly data
+            if len(self._hourly_closes) >= 50:  # EMA needs at least 50 hours
+                self._indicator_value = self.indicator.calculate(
+                    np.array(self._hourly_closes), 
+                    np.array(self._hourly_volumes)
+                )
+                logger.info(f"Hourly EMA signal calculated: {self.indicator.name}={self._indicator_value:.6f}")
     
     def _on_daily_bar(self, bar: Bar):
         """Handle daily bar data for indicator calculation."""
@@ -196,10 +236,12 @@ class BreakoutStrategy(Strategy):
         
         # Calculate indicator value excluding current (incomplete) day
         # Use all data except the last bar (current day)
-        self._indicator_value = self.indicator.calculate(
-            np.array(self._daily_closes[:-1]), 
-            np.array(self._daily_volumes[:-1])
-        )
+        # Skip if using EMA indicator (which uses hourly data)
+        if not (hasattr(self.indicator, '__class__') and self.indicator.__class__.__name__ == 'EMAIndicator'):
+            self._indicator_value = self.indicator.calculate(
+                np.array(self._daily_closes[:-1]), 
+                np.array(self._daily_volumes[:-1])
+            )
         
         # Calculate breakout levels from previous days (excluding current day)
         # This mimics shift(1) behavior from the original strategy
@@ -261,22 +303,14 @@ class BreakoutStrategy(Strategy):
         is_bullish = self._indicator_value > self.neutral_threshold
         is_bearish = self._indicator_value < -self.neutral_threshold
         
-        # Check for exit conditions FIRST (independent of indicator state - exits don't care about indicator)
+
         if self.position == 1 and not np.isnan(self._lowest_low_long_exit):
-            # Long exit: current low breaks below lowest low of last N days
             if current_low < self._lowest_low_long_exit:
-                logger.info(f"✅ LONG EXIT on minute bar @ {current_time}: {current_low:.2f} < {self._lowest_low_long_exit:.2f}")
                 self._execute_market_sell_exit()
-                # Update position after exit
-                self.position = 0
         
-        # Short exit: current high breaks above highest high of last N days
         elif self.position == -1 and not np.isnan(self._highest_high_short_exit):
             if current_high > self._highest_high_short_exit:
-                logger.info(f"✅ SHORT EXIT on minute bar @ {current_time}: {current_high:.2f} > {self._highest_high_short_exit:.2f}")
                 self._execute_market_sell_sh_exit()
-                # Update position after exit
-                self.position = 0
         
         # Check for entry conditions (only when no position AND indicator agrees)
         # Entry requires BOTH breakout level AND indicator agreement

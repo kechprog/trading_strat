@@ -23,8 +23,10 @@ All indicators implement the TrendIndicator interface for consistent usage.
 
 from .base import TrendIndicator
 from .momentum_mean_reversion_indicator import MomentumMeanReversionIndicator
+from .ema_indicator import EMAIndicator
 
 __all__ = [
     'TrendIndicator',
     'MomentumMeanReversionIndicator',
+    'EMAIndicator',
 ]
