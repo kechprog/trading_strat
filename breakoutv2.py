@@ -95,7 +95,6 @@ class BreakoutV2(Strategy):
         pass
 
     def on_historical_data(self, data: Data):
-        self.log.warning(f"Hey there: {data}")
         pass
 
     def on_stop(self):

@@ -20,6 +20,7 @@ from nautilus_trader.test_kit.providers import TestInstrumentProvider
 from nautilus_trader.model import Symbol
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.model import Bar
+from nautilus_trader.persistence.config import DataCatalogConfig
 
 catalog = ParquetDataCatalog("./catalog")
 nasdaq_venue = Venue("NASDAQ")
@@ -44,10 +45,10 @@ data_configs = [
     BacktestDataConfig(
         catalog_path="./catalog",
         data_cls=Bar,
-        instrument_ids=[InstrumentId.from_str("VOO.NASDAQ"), InstrumentId.from_str("SH.NASDAQ")],
+        instrument_ids=[InstrumentId.from_str("VOO.NASDAQ"), InstrumentId.from_str("SH.NASDAQ")], # type: ignore
         bar_spec=BarSpecification(
             30, BarAggregation.MINUTE, PriceType.LAST
-        ),
+        ), # type: ignore
         start_time=start_time,
         end_time=end_time
     ),
@@ -79,19 +80,20 @@ bt_config = BacktestEngineConfig(
     logging=LoggingConfig("WARNING"),
     strategies=[
         ImportableStrategyConfig(
-        strategy_path="breakoutv2:BreakoutV2",
-        config_path="breakoutv2:BreakoutV2Config",
-        config={
-            "main_symbol": InstrumentId.from_str("VOO.NASDAQ"),
-            "reverse_symbol": InstrumentId.from_str("SH.NASDAQ"),
-            "long_entry": 1,
-            "short_entry": 1,
-            "long_exit": 7,
-            "short_exit": 7,
-            "ema_lookback_hours": 50,
-        },
+            strategy_path="breakoutv2:BreakoutV2",
+            config_path="breakoutv2:BreakoutV2Config",
+            config={
+                "main_symbol": InstrumentId.from_str("VOO.NASDAQ"),
+                "reverse_symbol": InstrumentId.from_str("SH.NASDAQ"),
+                "long_entry": 1,
+                "short_entry": 1,
+                "long_exit": 7,
+                "short_exit": 7,
+                "ema_lookback_hours": 50,
+            },
         ),
     ],
+    catalogs=[DataCatalogConfig(path="./catalog")],
 )
 
 config = BacktestRunConfig(
