@@ -1,10 +1,62 @@
 from nautilus_trader.trading.strategy import Strategy
-from nautilus_trader.model import BarType, InstrumentId, BarSpecification, Bar
+from nautilus_trader.model import BarType, InstrumentId, BarSpecification, Bar, QuoteTick, TradeTick
 from nautilus_trader.model.enums import BarAggregation, PriceType
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.indicators.average.ema import ExponentialMovingAverage
 from nautilus_trader.core.data import Data
+from nautilus_trader.indicators.base.indicator import Indicator
 import pandas as pd
+
+class HighLowDailyHistIndicator(Indicator):
+    initialized: bool = False
+    value: tuple[float, float] | None = None  # (high, low)
+
+    def __init__(self, lookback: int = 7):
+        self.initialized = False
+        self.value = None
+
+        self.lookback = lookback
+        self.highs = []
+        self.lows = []
+
+    def __repr__(self) -> str:
+        return f"HighLowDailyHistIndicator(lookback={self.lookback})"
+
+    def handle_quote_tick(self, tick: QuoteTick) -> None:
+        raise RuntimeError("HighLowDailyHistIndicator does not support quote ticks")
+        
+    def handle_trade_tick(self, tick: TradeTick) -> None:
+        raise RuntimeError("HighLowDailyHistIndicator does not support trade ticks")
+
+    def handle_bar(self, bar: Bar) -> None:
+        assert len(self.highs) == len(self.lows)
+
+        self.initialized = len(self.highs) >= self.lookback
+
+        self.highs.append(bar.high)
+        self.lows.append(bar.low)
+
+        if len(self.highs) > self.lookback:
+            self.highs.pop(0)
+            self.lows.pop(0)
+
+        if self.initialized:
+            self.value = (max(self.highs), min(self.lows))
+
+    def reset(self) -> None:
+        self.highs = []
+        self.lows = []
+        self.value = None
+        self.initialized = False
+
+    def _set_has_inputs(self, setting: bool) -> None:
+        raise NotImplementedError()
+
+    def _set_initialized(self, setting: bool) -> None:
+        self.initialized = setting
+
+    def _reset(self) -> None:
+        self.reset()
 
 class BreakoutV2Config(StrategyConfig, frozen=True):
     main_symbol: InstrumentId = InstrumentId.from_str("VOO.NASDAQ")
@@ -30,13 +82,11 @@ class BreakoutV2(Strategy):
 
         self.ema_lookback_hours = config.ema_lookback_hours
 
-        self.hist_1min = None
-        self.hist_30min = None
         self.hist_daily = None
+        self.daily_live = None
 
-        
-
-        self.daily_lookback = max(self.long_entry, self.short_entry, self.long_entry, self.long_exit)
+        self.ema = ExponentialMovingAverage(self.ema_lookback_hours, PriceType.LAST)
+        self.high_low_ind = HighLowDailyHistIndicator(lookback=max(self.long_entry, self.short_entry, self.long_entry, self.long_exit))
 
     def on_start(self):
         self.log.info(f"Starting BreakoutV2 strategy with config: {self.__dict__}")
@@ -48,17 +98,6 @@ class BreakoutV2(Strategy):
             self.log.error(f"Instruments not found: main={main_instrument}, reverse={reverse_instrument}")
             self.stop()
             return
-        
-        # Setup Indicator
-        # self.ema = ExponentialMovingAverage(self.ema_lookback_hours, PriceType.LAST)
-        # ema_bar_type = BarType(
-        #     self.main_symbol,
-        #     BarSpecification(30, BarAggregation.MINUTE, PriceType.LAST)
-        # )
-        # self.register_indicator_for_bars(ema_bar_type, self.ema)
-        # self.request_bars(ema_bar_type)
-
-
 
         # 1 Minute Bars
         for symbol in [self.main_symbol, self.reverse_symbol]:
@@ -79,23 +118,33 @@ class BreakoutV2(Strategy):
             self.subscribe_bars(bar_type)
 
         # Setup hist daily
-        self.request_bars(
-            BarType(
-                self.main_symbol,
-                BarSpecification(1, BarAggregation.DAY, PriceType.LAST)), 
-            start = self._clock.utc_now() - pd.Timedelta(days=self.daily_lookback + 5))
+        high_low_bar_type = BarType(
+            self.main_symbol,
+            BarSpecification(1, BarAggregation.DAY, PriceType.LAST)
+        )
+        self.register_indicator_for_bars(high_low_bar_type, self.high_low_ind)
+        self.request_bars(high_low_bar_type)
+
+        ema_bar_type = BarType(
+            self.main_symbol,
+            BarSpecification(30, BarAggregation.MINUTE, PriceType.LAST)
+        )
+        self.register_indicator_for_bars(ema_bar_type, self.ema)
+        self.request_bars(ema_bar_type)
 
     def on_1minute_bar(self, bar: Bar):
+        # print(self.ema.initialized)
         pass
 
     def on_30minute_bar(self, bar: Bar):
         pass
 
     def on_daily_bar(self, bar: Bar):
-        pass
+        print(self.high_low_ind.value)
 
     def on_historical_data(self, data: Data):
         pass
+        
 
     def on_stop(self):
         self.log.info("Stopping BreakoutV2 strategy")
@@ -113,4 +162,4 @@ class BreakoutV2(Strategy):
             case BarAggregation.DAY:
                 self.on_daily_bar(bar)
             case _:
-                self.log.warning(f"Unhandled bar aggregation: {bar.bar_type.spec.bar_aggregation}")
+                self.log.warning(f"Unhandled bar aggregation: {bar.bar_type.spec.aggregation}")
