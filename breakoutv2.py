@@ -1,51 +1,58 @@
 from nautilus_trader.trading.strategy import Strategy
-from nautilus_trader.model import BarType, InstrumentId, BarSpecification, Bar, QuoteTick, TradeTick
+from nautilus_trader.model import BarType, InstrumentId, BarSpecification, Bar, QuoteTick, TradeTick, Price
 from nautilus_trader.model.enums import BarAggregation, PriceType
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.indicators.average.ema import ExponentialMovingAverage
 from nautilus_trader.core.data import Data
 from nautilus_trader.indicators.base.indicator import Indicator
-import pandas as pd
+# import pandas as pd
+
+from typing import List
 
 class HighLowDailyHistIndicator(Indicator):
     initialized: bool = False
     value: tuple[float, float] | None = None  # (high, low)
 
+    _highs: List[Price | None]
+    _lows: List[Price | None]
+
     def __init__(self, lookback: int = 7):
-        self.initialized = False
-        self.value = None
+        if lookback <= 0:
+            raise ValueError("lookback must be >= 1")
 
         self.lookback = lookback
-        self.highs = []
-        self.lows = []
+        self._highs = [None] * self.lookback
+        self._lows = [None] * self.lookback
+        self._next_idx = 0
+
+        self.initialized = False
+        self.value = None
 
     def __repr__(self) -> str:
         return f"HighLowDailyHistIndicator(lookback={self.lookback})"
 
     def handle_quote_tick(self, tick: QuoteTick) -> None:
         raise RuntimeError("HighLowDailyHistIndicator does not support quote ticks")
-        
+
     def handle_trade_tick(self, tick: TradeTick) -> None:
         raise RuntimeError("HighLowDailyHistIndicator does not support trade ticks")
 
     def handle_bar(self, bar: Bar) -> None:
-        assert len(self.highs) == len(self.lows)
+        self._highs[self._next_idx] = bar.high
+        self._lows[self._next_idx] = bar.low
 
-        self.initialized = len(self.highs) >= self.lookback
+        self.initialized = self.initialized or (self._next_idx == self.lookback - 1)
+        
+        self._next_idx = (self._next_idx + 1) % self.lookback
 
-        self.highs.append(bar.high)
-        self.lows.append(bar.low)
-
-        if len(self.highs) > self.lookback:
-            self.highs.pop(0)
-            self.lows.pop(0)
 
         if self.initialized:
-            self.value = (max(self.highs), min(self.lows))
+            self.value = (max(self._highs), min(self._lows)) # type: ignore
 
     def reset(self) -> None:
-        self.highs = []
-        self.lows = []
+        self._highs = [None] * self.lookback
+        self._lows = [None] * self.lookback
+        self._next_idx = 0
         self.value = None
         self.initialized = False
 
