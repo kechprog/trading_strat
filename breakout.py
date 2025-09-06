@@ -24,17 +24,28 @@ from nautilus_trader.model.data import BarType
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.trading.strategy import Strategy
+from nautilus_trader.config import StrategyConfig
 
 # Import indicator interface and default implementation
 import sys
 from pathlib import Path
+
+from indicators.ema_indicator import EMAIndicator
 sys.path.append(str(Path(__file__).parent))
 from indicators import TrendIndicator
 
 
 logger = logging.getLogger(__name__)
 
-
+class BreakoutConfig(StrategyConfig, frozen=True):
+        long_entry_lookback: int = 1   # Ultra-fast long entries
+        long_exit_lookback: int = 8     # Very slow long exits  
+        short_entry_lookback: int = 6   # Cautious short entries
+        short_exit_lookback: int = 1    # Quick short exits
+        neutral_threshold: float = 1e-10
+        trade_size_pct: float = 1.0     # Use 100% of available capital
+        min_trade_size: int = 1         # Minimum shares
+        use_fixed_capital: bool = True  # Cap position size at starting capital
 
 
 class BreakoutStrategy(Strategy):
@@ -49,7 +60,7 @@ class BreakoutStrategy(Strategy):
     5. Supports any indicator implementing the TrendIndicator interface
     """
     
-    def __init__(self, indicator: TrendIndicator, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, indicator: TrendIndicator = EMAIndicator(), config: BreakoutConfig = BreakoutConfig()):
         """
         Initialize the breakout strategy with a pluggable indicator.
         
@@ -73,19 +84,16 @@ class BreakoutStrategy(Strategy):
         self._hourly_closes = []
         self._hourly_volumes = []
         
-        # Strategy parameters (configurable)
-        config = config or {}
-        
 
-        self.long_entry_lookback = config.get('long_entry_lookback', 1)   # Ultra-fast long entries
-        self.long_exit_lookback = config.get('long_exit_lookback', 8)     # Very slow long exits  
-        self.short_entry_lookback = config.get('short_entry_lookback', 6) # Cautious short entries
-        self.short_exit_lookback = config.get('short_exit_lookback', 1)   # Quick short exits
-        self.neutral_threshold = config.get('neutral_threshold', 1e-10)
-        self.trade_size_pct = config.get('trade_size_pct', 1.0)  # Use 100% of available capital
-        self.min_trade_size = config.get('min_trade_size', 1)  # Minimum shares
-        self.use_fixed_capital = config.get('use_fixed_capital', True)  # Cap position size at starting capital
-        self.starting_capital = 100000.0  # Initial capital (will be set from actual balance)
+        self.long_entry_lookback = config.long_entry_lookback
+        self.long_exit_lookback = config.long_exit_lookback
+        self.short_entry_lookback = config.short_entry_lookback
+        self.short_exit_lookback = config.short_exit_lookback
+        self.neutral_threshold = config.neutral_threshold
+        self.trade_size_pct = config.trade_size_pct
+        self.min_trade_size = config.min_trade_size
+        self.use_fixed_capital = config.use_fixed_capital
+        self.starting_capital = 100000.0
         
         # Store the pluggable indicator
         self.indicator = indicator

@@ -25,8 +25,8 @@ from nautilus_trader.persistence.config import DataCatalogConfig
 catalog = ParquetDataCatalog("./catalog")
 nasdaq_venue = Venue("NASDAQ")
 
-start_time = "2022-04-01"
-end_time = "2022-07-01"
+start_time = "2014-04-01"
+end_time = "2023-07-01"
 
 
 data_configs = [
@@ -69,6 +69,11 @@ bt_config = BacktestEngineConfig(
                 "ema_lookback_hours": 50,
             },
         ),
+        # ImportableStrategyConfig(
+        #     strategy_path="breakout:BreakoutStrategy",
+        #     config_path="breakout:BreakoutConfig",
+        #     config={},
+        # )
     ],
     catalogs=[DataCatalogConfig(path="./catalog")],
 )
@@ -82,6 +87,3 @@ config = BacktestRunConfig(
 node = BacktestNode(configs=[config])
 
 results = node.run()
-
-print(results[0])
-print(results[0].stats_pnls)

@@ -42,16 +42,21 @@ class HighLowDailyHistIndicator(Indicator):
         raise RuntimeError("HighLowDailyHistIndicator does not support trade ticks")
 
     def handle_bar(self, bar: Bar) -> None:
+        # Compute levels from the previous N complete days (exclude current day)
+        # by calculating before inserting the current bar into the buffer.
+        if self.initialized:
+            # type: ignore
+            self.value = (max(self._highs), min(self._lows))  # previous N days only
+
+        # Insert current day's bar into the ring buffer for use on the NEXT day
         self._highs[self._next_idx] = bar.high
         self._lows[self._next_idx] = bar.low
 
-        self.initialized = self.initialized or (self._next_idx == self.lookback - 1)
-        
+        # Initialize once we have filled the buffer (value becomes available next bar)
+        if not self.initialized and self._next_idx == self.lookback - 1:
+            self.initialized = True
+
         self._next_idx = (self._next_idx + 1) % self.lookback
-
-
-        if self.initialized:
-            self.value = (max(self._highs), min(self._lows)) # type: ignore
 
     def reset(self) -> None:
         self._highs = [None] * self.lookback
@@ -134,11 +139,14 @@ class BreakoutV2(Strategy):
 
         self.hist_daily = None
         self.daily_live = None
+        self._market_regime = 0  # -1 bearish, 0 neutral, 1 bullish based on hourly EMA
 
         self.ema = ExponentialMovingAverage(self.ema_lookback_hours, PriceType.LAST)
-        # TODO: 4 indicators perhaps?
-        self.high_low_exit = HighLowDailyHistIndicator(lookback=self.long_entry)
-        self.high_low_enter = HighLowDailyHistIndicator(lookback=self.short_exit)
+        # Two lookback windows for now: entry and exit (applied to both sides).
+        entry_lookback = self.long_entry
+        exit_lookback = self.long_exit
+        self.high_low_enter = HighLowDailyHistIndicator(lookback=entry_lookback)
+        self.high_low_exit = HighLowDailyHistIndicator(lookback=exit_lookback)
 
     def on_start(self):
         self.log.info(f"Starting BreakoutV2 strategy with config: {self.__dict__}")
@@ -161,143 +169,76 @@ class BreakoutV2(Strategy):
 
         # indicators
         self.register_indicator_for_bars(self.bar_types["1day_main"], self.high_low_enter)
-        self.register_indicator_for_bars(self.bar_types["1day_reverse"], self.high_low_exit)
+        self.register_indicator_for_bars(self.bar_types["1day_main"], self.high_low_exit)
         self.register_indicator_for_bars(self.bar_types["60min_main"], self.ema)
 
     def on_1minute_bar(self, bar: Bar):
-        return
-
-    def on_hour_bar(self, bar: Bar):
+        # Execute entries/exits on minute bars for better price reactivity
         if bar.bar_type.instrument_id != self.main_symbol:
             return
 
-        if not self.ema.initialized or not self.high_low_enter.initialized or not self.high_low_exit.initialized: # type: ignore
-            self.log.info("Indicators not initialized")
+        # Ensure signals are ready
+        if not (self.ema.initialized and self.high_low_enter.initialized and self.high_low_exit.initialized):  # type: ignore
             return
 
         assert self.high_low_enter.value is not None and self.high_low_exit.value is not None
         high_entry, low_entry = self.high_low_enter.value
         high_exit, low_exit = self.high_low_exit.value
-        indicator = 1 if bar.close > self.ema.value else -1
 
-        main_pos: int = self.portfolio.net_position(self.main_symbol) #type: ignore
-        reverse_pos: int = self.portfolio.net_position(self.reverse_symbol) #type: ignore
+        # Positions
+        main_pos: int = self.portfolio.net_position(self.main_symbol)  # type: ignore
+        reverse_pos: int = self.portfolio.net_position(self.reverse_symbol)  # type: ignore
 
-        main_last_px = self.cache.bar(
-            BarType(self.main_symbol, 
-                    BarSpecification(1, 
-                                     BarAggregation.MINUTE, 
-                                     PriceType.LAST))).close
-        reverse_last_px = self.cache.bar(
-            BarType(self.reverse_symbol, 
-                    BarSpecification(1, 
-                                     BarAggregation.MINUTE, 
-                                     PriceType.LAST))).close
-
-        if bar.close < low_exit and main_pos > 0:
+        # Exits first
+        if main_pos > 0 and float(bar.low) < float(low_exit):
             order = self.order_factory.market(
                 self.main_symbol,
                 OrderSide.SELL,
-                Quantity.from_int(int(main_pos))
+                Quantity.from_int(int(main_pos)),
             )
             self.submit_order(order)
 
-        if bar.close > high_exit and reverse_pos > 0:
+        if reverse_pos > 0 and float(bar.high) > float(high_exit):
             order = self.order_factory.market(
                 self.reverse_symbol,
                 OrderSide.SELL,
-                Quantity.from_int(int(reverse_pos))
+                Quantity.from_int(int(reverse_pos)),
             )
             self.submit_order(order)
 
-        if bar.close > high_entry and indicator == 1 and main_pos == 0 and reverse_pos == 0:
-            balance = self.portfolio.account(self.venue).balance_total().as_double() # type: ignore
-            quantity = math.floor((balance * 0.95) / main_last_px)
-            order = self.order_factory.market(
-                self.main_symbol,
-                OrderSide.BUY,
-                Quantity.from_int(quantity)
-            )
-            self.submit_order(order)
+        # Entries (only when flat and regime agrees)
+        if main_pos == 0 and reverse_pos == 0:
+            balance = self.portfolio.account(self.venue).balance_total().as_double()  # type: ignore
+            if self._market_regime == 1 and float(bar.high) > float(high_entry):
+                px = float(bar.close)
+                qty = max(0, math.floor((balance * 0.95) / px))
+                if qty > 0:
+                    order = self.order_factory.market(self.main_symbol, OrderSide.BUY, Quantity.from_int(qty))
+                    self.submit_order(order)
 
-        if bar.close < low_entry and indicator == -1 and reverse_pos == 0 and main_pos == 0:
-            balance = self.portfolio.account(self.venue).balance_total().as_double() # type: ignore
-            quantity = math.floor((balance * 0.95) / reverse_last_px)
-            order = self.order_factory.market(
-                self.reverse_symbol,
-                OrderSide.BUY,
-                Quantity.from_int(quantity)
-            )
-            self.submit_order(order)
 
-        print(unix_nanos_to_dt(bar.ts_event), unix_nanos_to_dt(bar.ts_init), bar)
+            if self._market_regime == -1 and float(bar.low) < float(low_entry):
+                px = float(bar.close)
+                qty = max(0, math.floor((balance * 0.95) / px))
+                if qty > 0:
+                    order = self.order_factory.market(self.reverse_symbol, OrderSide.BUY, Quantity.from_int(qty))
+                    self.submit_order(order)
 
-    def on_order_pending_update(self, event: OrderPendingUpdate) -> None:
-        print(event)
 
-    def on_order_initialized(self, event: OrderInitialized) -> None:
-        """ Called when order is intialized, not very important """
-        pass
-
-    def on_order_accepted(self, event: OrderAccepted) -> None:
-        """ No idea what that does """
-        pass
-    
-    def on_order_cancel_rejected(self, event: OrderCancelRejected) -> None:
-        print(event)
-
-    def on_order_canceled(self, event: OrderCanceled) -> None:
-        print(event)
-
-    def on_order_denied(self, event: OrderDenied) -> None:
-        print(event)
-
-    def on_order_emulated(self, event: OrderEmulated) -> None:
-        print(event)
-
-    def on_order_expired(self, event: OrderExpired) -> None:
-        print(event)
-
-    def on_order_filled(self, event: OrderFilled) -> None:
-        """ When we get the order completed apperantly """
-        # main_pos = self.portfolio.net_position(self.main_symbol)
-        # reverse_pos = self.portfolio.net_position(self.reverse_symbol)
-
-        # print(f"Order filled: {event}. Main pos: {main_pos}, Reverse pos: {reverse_pos}")
-        # exit()
-        pass
-
-    def on_order_modify_rejected(self, event: OrderModifyRejected) -> None:
-        print(event)
-
-    def on_order_pending_cancel(self, event: OrderPendingCancel) -> None:
-        print(event)
-
-    def on_order_rejected(self, event: OrderRejected) -> None:
-        print(event)
-
-    def on_order_released(self, event: OrderReleased) -> None:
-        print(event)
-
-    def on_order_submitted(self, event: OrderSubmitted) -> None:
-        """ When we get the order sent to the exchange """
-        pass
-
-    def on_order_triggered(self, event: OrderTriggered) -> None:
-        print(event)
-
-    def on_order_updated(self, event: OrderUpdated) -> None:
-        print(event)
-
+    def on_hour_bar(self, bar: Bar):
+        if bar.bar_type.instrument_id != self.main_symbol:
+            return
+        if not self.ema.initialized:
+            return
+        self._market_regime = 1 if bar.close > self.ema.value else -1
 
     def on_daily_bar(self, bar: Bar):
         pass
 
-    def on_historical_data(self, data: Data):
-        pass
-
     def on_stop(self):
-        self.log.info("Stopping BreakoutV2 strategy")
+        print(f"main pos: {self.portfolio.net_position(self.main_symbol)}")
+        print(f"reverse pos: {self.portfolio.net_position(self.reverse_symbol)}")
+        print(f"Final Balances: {self.portfolio.account(self.venue).balance_total().as_double()}")
 
     def on_bar(self, bar: Bar):
         bar_spec = bar.bar_type.spec
@@ -314,7 +255,3 @@ class BreakoutV2(Strategy):
             case _:
                 self.log.warning(f"Unhandled bar aggregation: {bar.bar_type.spec.aggregation}")
                 pass
-        if bar_spec.aggregation == BarAggregation.MINUTE and bar_spec.step == 1:
-            self.on_1minute_bar(bar)
-        if bar_spec.aggregation == BarAggregation.DAY and bar_spec.step == 1:
-            self.on_daily_bar(bar)
