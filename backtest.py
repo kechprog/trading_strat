@@ -30,24 +30,12 @@ end_time = "2022-07-01"
 
 
 data_configs = [
-    # 1 min
     BacktestDataConfig(
         catalog_path="./catalog",
         data_cls=Bar,
         instrument_ids=[InstrumentId.from_str("VOO.NASDAQ"), InstrumentId.from_str("SH.NASDAQ")],
         bar_spec=BarSpecification(
             1, BarAggregation.MINUTE, PriceType.LAST
-        ),
-        start_time=start_time,
-        end_time=end_time
-    ),
-    # 1 day
-    BacktestDataConfig(
-        catalog_path="./catalog",
-        data_cls=Bar,
-        instrument_ids=[InstrumentId.from_str("VOO.NASDAQ"), InstrumentId.from_str("SH.NASDAQ")],
-        bar_spec=BarSpecification(
-            1, BarAggregation.DAY, PriceType.LAST
         ),
         start_time=start_time,
         end_time=end_time
@@ -61,7 +49,7 @@ venue_conf = BacktestVenueConfig(
     base_currency="USD",
     starting_balances=["1_000_000 USD"],
     # fill_model=FillModel(),
-    bar_adaptive_high_low_ordering=True,
+    bar_adaptive_high_low_ordering=False,
 )
 
 bt_config = BacktestEngineConfig(

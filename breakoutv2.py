@@ -99,33 +99,36 @@ class BreakoutV2(Strategy):
         self.bar_types = {
             "1min_main": BarType(
                 self.main_symbol,
-                BarSpecification(1, BarAggregation.MINUTE, PriceType.LAST)
+                BarSpecification(1, BarAggregation.MINUTE, PriceType.LAST),
+                aggregation_source=AggregationSource.EXTERNAL,
             ),
             "1min_reverse": BarType(
                 self.reverse_symbol,
-                BarSpecification(1, BarAggregation.MINUTE, PriceType.LAST)
+                BarSpecification(1, BarAggregation.MINUTE, PriceType.LAST),
+                aggregation_source=AggregationSource.EXTERNAL,
             ),
 
-            # "30min_main": BarType(
-            #     self.main_symbol,
-            #     BarSpecification(30, BarAggregation.MINUTE, PriceType.LAST),
-            #     aggregation_source=AggregationSource.INTERNAL
-            # ),
-
-            # "30min_reverse": BarType(
-            #     self.reverse_symbol,
-            #     BarSpecification(30, BarAggregation.MINUTE, PriceType.LAST),
-            #     aggregation_source=AggregationSource.INTERNAL
-            # ),
+            "60min_main": BarType(
+                self.main_symbol,
+                BarSpecification(1, BarAggregation.HOUR, PriceType.LAST),
+                aggregation_source=AggregationSource.EXTERNAL,
+            ),
+            "60min_reverse": BarType(
+                self.reverse_symbol,
+                BarSpecification(1, BarAggregation.HOUR, PriceType.LAST),
+                aggregation_source=AggregationSource.EXTERNAL,
+            ),
 
             "1day_main": BarType(
                 self.main_symbol,
-                BarSpecification(1, BarAggregation.DAY, PriceType.LAST)
+                BarSpecification(1, BarAggregation.DAY, PriceType.LAST),
+                aggregation_source=AggregationSource.EXTERNAL,
             ),
 
             "1day_reverse": BarType(
                 self.reverse_symbol,
-                BarSpecification(1, BarAggregation.DAY, PriceType.LAST)
+                BarSpecification(1, BarAggregation.DAY, PriceType.LAST),
+                aggregation_source=AggregationSource.EXTERNAL,
             )
         }
 
@@ -148,30 +151,26 @@ class BreakoutV2(Strategy):
             self.stop()
             return
         
-        for bars in self.bar_types.values():
-            self.subscribe_bars(bars)
+        # Subscribe to hourly + daily bars used by the strategy
+        self.subscribe_bars(self.bar_types["1min_main"])       # for order fills / tracking
+        self.subscribe_bars(self.bar_types["1min_reverse"])    # for order fills /
+        self.subscribe_bars(self.bar_types["60min_main"])      # for on_hour_bar logic / EMA
+        self.subscribe_bars(self.bar_types["60min_reverse"])   # reverse hourly for sizing/logic
+        self.subscribe_bars(self.bar_types["1day_main"])       # for daily checks
+        self.subscribe_bars(self.bar_types["1day_reverse"])    # for daily checks
 
         # indicators
         self.register_indicator_for_bars(self.bar_types["1day_main"], self.high_low_enter)
         self.register_indicator_for_bars(self.bar_types["1day_reverse"], self.high_low_exit)
-        # self.register_indicator_for_bars(self.bar_types["30min_main"], self.ema)
-
-        self.subscribe_bars(BarType.from_str("VOO.NASDAQ-30-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL"))
+        self.register_indicator_for_bars(self.bar_types["60min_main"], self.ema)
 
     def on_1minute_bar(self, bar: Bar):
         return
 
-    def on_30minute_bar(self, bar: Bar):
+    def on_hour_bar(self, bar: Bar):
         if bar.bar_type.instrument_id != self.main_symbol:
             return
-        
-        if bar.is_revision:
-            print("Interesting")
-            exit()
 
-        print(f"{unix_nanos_to_dt(bar.ts_init)} | {bar.close}, {bar.volume}")
-        return
-        
         if not self.ema.initialized or not self.high_low_enter.initialized or not self.high_low_exit.initialized: # type: ignore
             self.log.info("Indicators not initialized")
             return
@@ -304,12 +303,18 @@ class BreakoutV2(Strategy):
         bar_spec = bar.bar_type.spec
         match bar_spec.aggregation:
             case BarAggregation.MINUTE:
-                if bar_spec.step == 30:
-                    self.on_30minute_bar(bar)
-                # else:
-                    # self.log.warning(f"Unhandled minute bar step: {bar_spec.step}")
+                if bar_spec.step == 1:
+                    self.on_1minute_bar(bar)
+            case BarAggregation.HOUR:
+                if bar_spec.step == 1:
+                    self.on_hour_bar(bar)
             case BarAggregation.DAY:
-                self.on_daily_bar(bar)
+                if bar_spec.step == 1:
+                    self.on_daily_bar(bar)
             case _:
-                # self.log.warning(f"Unhandled bar aggregation: {bar.bar_type.spec.aggregation}")
+                self.log.warning(f"Unhandled bar aggregation: {bar.bar_type.spec.aggregation}")
                 pass
+        if bar_spec.aggregation == BarAggregation.MINUTE and bar_spec.step == 1:
+            self.on_1minute_bar(bar)
+        if bar_spec.aggregation == BarAggregation.DAY and bar_spec.step == 1:
+            self.on_daily_bar(bar)
