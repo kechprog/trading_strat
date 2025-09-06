@@ -242,6 +242,25 @@ class BreakoutV2(Strategy):
         print(f"reverse pos: {self.portfolio.net_position(self.reverse_symbol)}, px: {self.cache.bar(self.bar_types['1min_reverse']).close}")
         print(f"Final Balances: {self.portfolio.account(self.venue).balance_total().as_double()}")
 
+    def on_order_filled(self, event: OrderFilled):
+        """Print account balance when a position has been fully closed.
+
+        We disallow more than one open position at a time (either main or reverse).
+        After a fill, if both instruments are flat, this indicates a position-close
+        trade has completed, so we print the current account balance (equity curve).
+        """
+        try:
+            main_pos = int(self.portfolio.net_position(self.main_symbol))  # type: ignore
+            reverse_pos = int(self.portfolio.net_position(self.reverse_symbol))  # type: ignore
+
+            # Only print when we're flat across both instruments (i.e., just closed)
+            if main_pos == 0 and reverse_pos == 0:
+                balance = self.portfolio.account(self.venue).balance_total().as_double()  # type: ignore
+                # print(f"Balance after close: {balance}")
+        except Exception as e:
+            # Don't let logging issues interrupt strategy flow
+            self.log.warning(f"on_order_filled balance print failed: {e}")
+
     def on_bar(self, bar: Bar):
         bar_spec = bar.bar_type.spec
         match bar_spec.aggregation:
