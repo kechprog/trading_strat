@@ -1,514 +1,277 @@
-#!/usr/bin/env python3
-"""
-Breakout Strategy: Configurable Indicator-Based Trading Strategy
-
-This strategy uses configurable trend indicators to generate trading signals
-with breakout entry/exit logic based on daily candles.
-
-The strategy:
-1. Subscribes directly to daily bars from Nautilus
-2. Calculates indicator values on daily data (once per day)  
-3. Places stop orders at the start of each day based on daily breakout levels
-4. Uses fixed position sizing (configurable number of contracts)
-5. Supports swappable indicators via the TrendIndicator interface
-
-Based on the outline in nautilus_impl/strategies/outline.md
-"""
-
-import logging
-import numpy as np
-from typing import Optional, Dict, Any
-
-from nautilus_trader.model.data import Bar
-from nautilus_trader.model.data import BarType
-from nautilus_trader.model.enums import OrderSide
-from nautilus_trader.model.objects import Quantity
+from nautilus_trader.model.book import OrderBook
+from nautilus_trader.model.events.order import OrderAccepted, OrderCancelRejected, OrderCanceled, OrderDenied, OrderEmulated, OrderEvent, OrderExpired, OrderFilled, OrderInitialized, OrderModifyRejected, OrderPendingCancel, OrderPendingUpdate, OrderRejected, OrderReleased, OrderSubmitted, OrderTriggered, OrderUpdated
 from nautilus_trader.trading.strategy import Strategy
+from nautilus_trader.model import BarType, InstrumentId, BarSpecification, Bar, QuoteTick, TradeTick, Price, Quantity
+from nautilus_trader.model.enums import BarAggregation, PriceType, OrderSide, AggregationSource
 from nautilus_trader.config import StrategyConfig
+from nautilus_trader.indicators.average.ema import ExponentialMovingAverage
+from nautilus_trader.core.data import Data
+from nautilus_trader.indicators.base.indicator import Indicator
+from nautilus_trader.core.datetime import unix_nanos_to_dt
+import math
+# import pandas as pd
 
-# Import indicator interface and default implementation
-import sys
-from pathlib import Path
+from typing import List
 
-from indicators.ema_indicator import EMAIndicator
-sys.path.append(str(Path(__file__).parent))
-from indicators import TrendIndicator
+class HighLowDailyHistIndicator(Indicator):
+    initialized: bool = False
+    value: tuple[float, float] | None = None  # (high, low)
+
+    _highs: List[Price | None]
+    _lows: List[Price | None]
+
+    def __init__(self, lookback: int = 7):
+        if lookback <= 0:
+            raise ValueError("lookback must be >= 1")
+
+        self.lookback = lookback
+        self._highs = [None] * self.lookback
+        self._lows = [None] * self.lookback
+        self._next_idx = 0
+
+        self.initialized = False
+        self.value = None
+
+    def __repr__(self) -> str:
+        return f"HighLowDailyHistIndicator(lookback={self.lookback})"
+
+    def handle_quote_tick(self, tick: QuoteTick) -> None:
+        raise RuntimeError("HighLowDailyHistIndicator does not support quote ticks")
+
+    def handle_trade_tick(self, tick: TradeTick) -> None:
+        raise RuntimeError("HighLowDailyHistIndicator does not support trade ticks")
+
+    def handle_bar(self, bar: Bar) -> None:
+        # Compute levels from the previous N complete days (exclude current day)
+        # by calculating before inserting the current bar into the buffer.
+        if self.initialized:
+            # type: ignore
+            self.value = (max(self._highs), min(self._lows))  # previous N days only
+
+        # Insert current day's bar into the ring buffer for use on the NEXT day
+        self._highs[self._next_idx] = bar.high
+        self._lows[self._next_idx] = bar.low
+
+        # Initialize once we have filled the buffer (value becomes available next bar)
+        if not self.initialized and self._next_idx == self.lookback - 1:
+            self.initialized = True
+
+        self._next_idx = (self._next_idx + 1) % self.lookback
+
+    def reset(self) -> None:
+        self._highs = [None] * self.lookback
+        self._lows = [None] * self.lookback
+        self._next_idx = 0
+        self.value = None
+        self.initialized = False
+
+    def _set_has_inputs(self, setting: bool) -> None:
+        raise NotImplementedError()
+
+    def _set_initialized(self, setting: bool) -> None:
+        self.initialized = setting
+
+    def _reset(self) -> None:
+        self.reset()
+
+class BreakoutV2Config(StrategyConfig, frozen=True):
+    main_symbol: InstrumentId = InstrumentId.from_str("VOO.NASDAQ")
+    reverse_symbol: InstrumentId = InstrumentId.from_str("SH.NASDAQ")
+    long_entry: int = 1
+    short_entry: int = 1
+    long_exit: int = 7
+    short_exit: int = 7
+
+    ema_lookback_hours: int = 50
 
 
-logger = logging.getLogger(__name__)
+class BreakoutV2(Strategy):
+    def __init__(self, config: BreakoutV2Config):
+        super().__init__(config)
 
-class BreakoutConfig(StrategyConfig, frozen=True):
-        long_entry_lookback: int = 1   # Ultra-fast long entries
-        long_exit_lookback: int = 8     # Very slow long exits  
-        short_entry_lookback: int = 6   # Cautious short entries
-        short_exit_lookback: int = 1    # Quick short exits
-        neutral_threshold: float = 1e-10
-        trade_size_pct: float = 1.0     # Use 100% of available capital
-        min_trade_size: int = 1         # Minimum shares
-        use_fixed_capital: bool = True  # Cap position size at starting capital
+        self.main_symbol = config.main_symbol
+        self.reverse_symbol = config.reverse_symbol
+        self.long_entry = config.long_entry
+        self.short_entry = config.short_entry
+        self.long_exit = config.long_exit
+        self.short_exit = config.short_exit
 
+        self.ema_lookback_hours = config.ema_lookback_hours
 
-class BreakoutStrategy(Strategy):
-    """
-    A configurable breakout trading strategy that supports swappable trend indicators.
-    
-    The strategy operates on daily candles:
-    1. Subscribes directly to daily bars from Nautilus
-    2. Calculates indicator values on daily data (once per day)
-    3. Places orders based on breakout levels and indicator signals
-    4. Uses fixed position sizing (configurable number of contracts)
-    5. Supports any indicator implementing the TrendIndicator interface
-    """
-    
-    def __init__(self, indicator: TrendIndicator = EMAIndicator(), config: BreakoutConfig = BreakoutConfig()):
-        """
-        Initialize the breakout strategy with a pluggable indicator.
-        
-        Args:
-            indicator: TrendIndicator instance to use for trend detection
-            config: Strategy configuration parameters
-        """
-        super().__init__()
-        self.voo_instrument = None  # Primary instrument (VOO)
-        self.sh_instrument = None   # Inverse ETF instrument (SH)
-        self.position = 0  # -1 for short (SH), 0 for neutral, 1 for long (VOO)
-        self._bar_count = 0
-        
-        # Historical daily data for indicator calculation
-        self._daily_closes = []
-        self._daily_volumes = []
-        self._daily_highs = []
-        self._daily_lows = []
-        
-        # Historical hourly data for EMA indicator
-        self._hourly_closes = []
-        self._hourly_volumes = []
-        
+        assert self.main_symbol.venue == self.reverse_symbol.venue, "Main and reverse symbols must be on the same venue(As of right now)"
+        self.venue = config.main_symbol.venue
 
-        self.long_entry_lookback = config.long_entry_lookback
-        self.long_exit_lookback = config.long_exit_lookback
-        self.short_entry_lookback = config.short_entry_lookback
-        self.short_exit_lookback = config.short_exit_lookback
-        self.neutral_threshold = config.neutral_threshold
-        self.trade_size_pct = config.trade_size_pct
-        self.min_trade_size = config.min_trade_size
-        self.use_fixed_capital = config.use_fixed_capital
-        self.starting_capital = 100000.0
-        
-        # Store the pluggable indicator
-        self.indicator = indicator
-        
-        # Daily signal tracking (calculated once per day)
-        self._indicator_value = np.nan
-        self._highest_high_long = np.nan
-        self._lowest_low_long_exit = np.nan
-        self._lowest_low_short = np.nan
-        self._highest_high_short_exit = np.nan
-        
-    def on_start(self):
-        """Called when the strategy is started."""
-        logger.info(f"BreakoutStrategy started with parameters:")
-        logger.info(f"  Indicator: {self.indicator.name}")
-        logger.info(f"  Indicator config: {self.indicator.get_config()}")
-        logger.info(f"  Long entry lookback: {self.long_entry_lookback}")
-        logger.info(f"  Long exit lookback: {self.long_exit_lookback}")
-        logger.info(f"  Short entry lookback: {self.short_entry_lookback}")
-        logger.info(f"  Short exit lookback: {self.short_exit_lookback}")
-        logger.info(f"  Neutral threshold: {self.neutral_threshold}")
-        logger.info(f"  Trade size: {self.trade_size_pct*100:.0f}% of available capital")
-        logger.info(f"  Fixed capital mode: {self.use_fixed_capital} (caps position size at starting capital)")
-        
-        # Subscribe to minute, hourly, and daily bar data for all available instruments  
-        for instrument in self.cache.instruments():
-            # Subscribe to daily bars for indicator calculation
-            daily_bar_type = BarType.from_str(f"{instrument.id}-1-DAY-LAST-EXTERNAL")
-            logger.info(f"Subscribing to daily bars: {daily_bar_type}")
-            self.subscribe_bars(daily_bar_type)
-            
-            # Subscribe to hourly bars for EMA indicator
-            hourly_bar_type = BarType.from_str(f"{instrument.id}-1-HOUR-LAST-EXTERNAL")
-            logger.info(f"Subscribing to hourly bars: {hourly_bar_type}")
-            self.subscribe_bars(hourly_bar_type)
-            
-            # Subscribe to minute bars for trade execution
-            minute_bar_type = BarType.from_str(f"{instrument.id}-1-MINUTE-LAST-EXTERNAL")
-            logger.info(f"Subscribing to minute bars: {minute_bar_type}")
-            self.subscribe_bars(minute_bar_type)
-            
-            # Identify VOO and SH instruments
-            symbol = str(instrument.id.symbol)
-            if symbol == "VOO":
-                self.voo_instrument = instrument.id
-                logger.info(f"VOO instrument identified: {self.voo_instrument}")
-                
-                # Note: Historical data will be loaded through regular on_bar callbacks
-                # The strategy will accumulate data as bars arrive
-                logger.info(f"VOO instrument ready for trading")
-                
-            elif symbol == "SH":
-                self.sh_instrument = instrument.id
-                logger.info(f"SH instrument identified: {self.sh_instrument}")
-    
-    def on_bar(self, bar: Bar):
-        """Handle minute, hourly, and daily bar data."""
-        # Determine bar type
-        bar_type_str = str(bar.bar_type)
-        is_daily_bar = "DAY" in bar_type_str
-        is_hourly_bar = "HOUR" in bar_type_str
-        
-        if is_daily_bar:
-            # Handle daily bar for indicator calculation
-            self._on_daily_bar(bar)
-        elif is_hourly_bar:
-            # Handle hourly bar for EMA indicator
-            self._on_hourly_bar(bar)
-        else:
-            # Handle minute bar for trade execution
-            self._on_minute_bar(bar)
-    
-    def _on_hourly_bar(self, bar: Bar):
-        """Handle hourly bar data for EMA indicator calculation."""
-        # Only process VOO bars for indicator calculation
-        if str(bar.bar_type.instrument_id.symbol) != "VOO":
-            return
-        
-        # Store hourly bar data
-        self._hourly_closes.append(float(bar.close))
-        self._hourly_volumes.append(float(bar.volume))
-        
-        # Keep only necessary history (50 hours for EMA + buffer)
-        max_hourly_history = 100  # 50 for EMA + 50 buffer
-        if len(self._hourly_closes) > max_hourly_history:
-            self._hourly_closes = self._hourly_closes[-max_hourly_history:]
-            self._hourly_volumes = self._hourly_volumes[-max_hourly_history:]
-        
-        # If using EMA indicator, calculate signals with hourly data
-        if hasattr(self.indicator, '__class__') and self.indicator.__class__.__name__ == 'EMAIndicator':
-            # Calculate indicator value with hourly data
-            if len(self._hourly_closes) >= 50:  # EMA needs at least 50 hours
-                self._indicator_value = self.indicator.calculate(
-                    np.array(self._hourly_closes), 
-                    np.array(self._hourly_volumes)
-                )
-                logger.info(f"Hourly EMA signal calculated: {self.indicator.name}={self._indicator_value:.6f}")
-    
-    def _on_daily_bar(self, bar: Bar):
-        """Handle daily bar data for indicator calculation."""
-        self._bar_count += 1
-        
-        # Only process VOO bars for indicator calculation
-        # SH bars are used for trading inverse positions
-        if str(bar.bar_type.instrument_id.symbol) != "VOO":
-            return
-        
-        # Store daily bar data for indicator calculation (VOO only)
-        self._daily_closes.append(float(bar.close))
-        self._daily_volumes.append(float(bar.volume))
-        self._daily_highs.append(float(bar.high))
-        self._daily_lows.append(float(bar.low))
-        
-        # Keep only necessary history (maximum lookback window + indicator window)
-        indicator_window = getattr(self.indicator, 'window', 28)  # Default to 28 if no window attribute
-        max_history = max(indicator_window, self.long_entry_lookback,
-                         self.short_entry_lookback, self.long_exit_lookback,
-                         self.short_exit_lookback) + 10
-        
-        if len(self._daily_closes) > max_history:
-            self._daily_closes = self._daily_closes[-max_history:]
-            self._daily_volumes = self._daily_volumes[-max_history:]
-            self._daily_highs = self._daily_highs[-max_history:]
-            self._daily_lows = self._daily_lows[-max_history:]
-        
-        logger.info(f"Received daily bar #{self._bar_count}: "
-                   f"O={bar.open} H={bar.high} L={bar.low} C={bar.close} V={bar.volume}")
-        
-        # Calculate daily signals with new bar
-        self._calculate_daily_signals()
-    
-    def _on_minute_bar(self, bar: Bar):
-        """Handle minute bar data for trade execution."""
-        # Only process VOO minute bars for trading decisions
-        if str(bar.bar_type.instrument_id.symbol) != "VOO":
-            return
-        
-        # Check breakout conditions on minute bars for better entry/exit prices
-        self._check_minute_breakouts(bar)
-    
-    def _calculate_daily_signals(self):
-        """Calculate indicator value and breakout levels using daily bars."""
-        # Need minimum data for indicator calculation
-        min_required = getattr(self.indicator, 'window', 28) + 1  # Default to 28 if no window attribute
-        if len(self._daily_closes) < min_required:
-            logger.info(f"Not enough daily bars for calculation: {len(self._daily_closes)}/{min_required}")
-            return
-        
-        # Calculate indicator value excluding current (incomplete) day
-        # Use all data except the last bar (current day)
-        # Skip if using EMA indicator (which uses hourly data)
-        if not (hasattr(self.indicator, '__class__') and self.indicator.__class__.__name__ == 'EMAIndicator'):
-            self._indicator_value = self.indicator.calculate(
-                np.array(self._daily_closes[:-1]), 
-                np.array(self._daily_volumes[:-1])
+        self.bar_types = {
+            "1min_main": BarType(
+                self.main_symbol,
+                BarSpecification(1, BarAggregation.MINUTE, PriceType.LAST),
+                aggregation_source=AggregationSource.EXTERNAL,
+            ),
+            "1min_reverse": BarType(
+                self.reverse_symbol,
+                BarSpecification(1, BarAggregation.MINUTE, PriceType.LAST),
+                aggregation_source=AggregationSource.EXTERNAL,
+            ),
+
+            "60min_main": BarType(
+                self.main_symbol,
+                BarSpecification(1, BarAggregation.HOUR, PriceType.LAST),
+                aggregation_source=AggregationSource.EXTERNAL,
+            ),
+            "60min_reverse": BarType(
+                self.reverse_symbol,
+                BarSpecification(1, BarAggregation.HOUR, PriceType.LAST),
+                aggregation_source=AggregationSource.EXTERNAL,
+            ),
+
+            "1day_main": BarType(
+                self.main_symbol,
+                BarSpecification(1, BarAggregation.DAY, PriceType.LAST),
+                aggregation_source=AggregationSource.EXTERNAL,
+            ),
+
+            "1day_reverse": BarType(
+                self.reverse_symbol,
+                BarSpecification(1, BarAggregation.DAY, PriceType.LAST),
+                aggregation_source=AggregationSource.EXTERNAL,
             )
-        
-        # Calculate breakout levels from previous days (excluding current day)
-        # This mimics shift(1) behavior from the original strategy
-        if len(self._daily_highs) > self.long_entry_lookback:
-            # Get the last N days BEFORE today
-            self._highest_high_long = max(self._daily_highs[-(self.long_entry_lookback+1):-1])
-        
-        if len(self._daily_lows) > self.long_exit_lookback:
-            # Get the last N days BEFORE today
-            self._lowest_low_long_exit = min(self._daily_lows[-(self.long_exit_lookback+1):-1])
-        
-        # Calculate short signals (now enabled with SH)
-        if len(self._daily_lows) > self.short_entry_lookback:
-            # Get the last N days BEFORE today
-            self._lowest_low_short = min(self._daily_lows[-(self.short_entry_lookback+1):-1])
-        
-        if len(self._daily_highs) > self.short_exit_lookback:
-            # Get the last N days BEFORE today
-            self._highest_high_short_exit = max(self._daily_highs[-(self.short_exit_lookback+1):-1])
-        
-        # Log the signals
-        if not np.isnan(self._indicator_value):
-            logger.info(f"Daily signals calculated: "
-                       f"{self.indicator.name}={self._indicator_value:.6f}, "
-                       f"LongEntry>{self._highest_high_long:.2f}, "
-                       f"LongExit<{self._lowest_low_long_exit:.2f}, "
-                       f"ShortEntry<{self._lowest_low_short:.2f}, "
-                       f"ShortExit>{self._highest_high_short_exit:.2f}")
-        else:
-            logger.info(f"Daily signals calculated: {self.indicator.name}=nan (insufficient valid data)")
-    
-    def _check_minute_breakouts(self, current_bar: Bar):
-        """Check for breakout conditions on minute bars and execute market orders immediately."""
-        if self.voo_instrument is None or self.sh_instrument is None:
-            return
-        
-        # Skip if we don't have indicator values yet
-        if np.isnan(self._indicator_value):
-            return
-        
-        # Get actual position from Nautilus cache
-        voo_position_size = self._get_actual_position_size(self.voo_instrument)
-        sh_position_size = self._get_actual_position_size(self.sh_instrument)
-        
-        # Update internal position tracking
-        if voo_position_size > 0:
-            self.position = 1  # Long VOO
-        elif sh_position_size > 0:
-            self.position = -1  # Short (via SH)
-        else:
-            self.position = 0  # Flat
-        
-        # Check for breakout conditions using current minute bar prices
-        current_high = float(current_bar.high)
-        current_low = float(current_bar.low)
-        current_time = current_bar.ts_event
-        
-        # Determine market regime
-        is_bullish = self._indicator_value > self.neutral_threshold
-        is_bearish = self._indicator_value < -self.neutral_threshold
-        
+        }
 
-        if self.position == 1 and not np.isnan(self._lowest_low_long_exit):
-            if current_low < self._lowest_low_long_exit:
-                self._execute_market_sell_exit()
-        
-        elif self.position == -1 and not np.isnan(self._highest_high_short_exit):
-            if current_high > self._highest_high_short_exit:
-                self._execute_market_sell_sh_exit()
-        
-        # Check for entry conditions (only when no position AND indicator agrees)
-        # Entry requires BOTH breakout level AND indicator agreement
-        elif self.position == 0:
-            if is_bullish and not np.isnan(self._highest_high_long):
-                # Long entry: current high breaks above highest high of last N days
-                if current_high > self._highest_high_long:
-                    logger.info(f"✅ LONG ENTRY on minute bar @ {current_time}: {current_high:.2f} > {self._highest_high_long:.2f}")
-                    self._execute_market_buy_voo_entry()
-            
-            elif is_bearish and not np.isnan(self._lowest_low_short):
-                # Short entry: current low breaks below lowest low of last N days (buy SH)
-                if current_low < self._lowest_low_short:
-                    logger.info(f"✅ SHORT ENTRY on minute bar @ {current_time}: {current_low:.2f} < {self._lowest_low_short:.2f}")
-                    self._execute_market_buy_sh_entry()
-    
-    def _calculate_position_size(self, price: float) -> int:
-        """Calculate position size using at most the starting capital."""
-        # Get available cash balance
-        accounts = self.cache.accounts()
-        if not accounts:
-            logger.warning("Could not get any accounts, using minimum trade size")
-            return self.min_trade_size
-            
-        # Use the first account (should be the only one in backtest)
-        account = accounts[0]
-        available_balance = account.balance_total().as_double()
-        
-        # Set starting capital on first trade
-        if self.starting_capital == 100000.0:  # Default value, not yet set
-            self.starting_capital = available_balance
-            logger.info(f"Starting capital set to: ${self.starting_capital:.2f}")
-        
-        # Use at most the starting capital, or whatever is available if less
-        capital_to_use = min(available_balance, self.starting_capital) if self.use_fixed_capital else available_balance
-        
-        # Calculate shares based on capital to use
-        shares = int(capital_to_use / price)
-        
-        # Ensure minimum trade size
-        shares = max(shares, self.min_trade_size)
-        
-        logger.info(f"Position sizing: balance=${available_balance:.2f}, using=${capital_to_use:.2f}, price=${price:.2f}, shares={shares} (${shares*price:.2f})")
-        return shares
+        self.hist_daily = None
+        self.daily_live = None
+        self._market_regime = 0  # -1 bearish, 0 neutral, 1 bullish based on hourly EMA
 
-    def _execute_market_buy_voo_entry(self):
-        """Execute immediate market buy order for VOO long entry."""
-        # Get current price for position sizing (use previous close as approximation)
-        current_price = float(self._daily_closes[-1]) if self._daily_closes else 400.0  # fallback price
-        position_size = self._calculate_position_size(current_price)
-        
-        order = self.order_factory.market(
-            instrument_id=self.voo_instrument,
-            order_side=OrderSide.BUY,
-            quantity=Quantity.from_str(str(position_size)),
-        )
-        
-        self.submit_order(order)
-        # Update position immediately in backtest since order executes immediately
-        self.position = 1
-        logger.info(f"Executed MARKET BUY VOO ENTRY order: qty={position_size} (${position_size*current_price:.2f}), position updated to LONG")
+        self.ema = ExponentialMovingAverage(self.ema_lookback_hours, PriceType.LAST)
+        # Two lookback windows for now: entry and exit (applied to both sides).
+        entry_lookback = self.long_entry
+        exit_lookback = self.long_exit
+        self.high_low_enter = HighLowDailyHistIndicator(lookback=entry_lookback)
+        self.high_low_exit = HighLowDailyHistIndicator(lookback=exit_lookback)
+
+        # No per-instrument minute price tracking in simple NETTING mode
+
+    def on_start(self):
+        self.log.info(f"Starting BreakoutV2 strategy with config: {self.__dict__}")
+
+        main_instrument = self.cache.instrument(self.main_symbol)
+        reverse_instrument = self.cache.instrument(self.reverse_symbol)
     
-    def _execute_market_buy_sh_entry(self):
-        """Execute immediate market buy order for SH short entry."""
-        # Get current price for position sizing (use previous close as approximation)
-        current_price = float(self._daily_closes[-1]) if self._daily_closes else 400.0  # fallback price for VOO
-        # For SH, we'll use similar sizing but the price will be different
-        sh_price = current_price * 0.25  # SH typically trades at about 1/4 of VOO price
-        position_size = self._calculate_position_size(sh_price)
-        
-        order = self.order_factory.market(
-            instrument_id=self.sh_instrument,
-            order_side=OrderSide.BUY,
-            quantity=Quantity.from_str(str(position_size)),
-        )
-        
-        self.submit_order(order)
-        # Update position immediately in backtest since order executes immediately
-        self.position = -1
-        logger.info(f"Executed MARKET BUY SH ENTRY order: qty={position_size} (${position_size*sh_price:.2f}), position updated to SHORT")
-    
-    def _execute_market_sell_exit(self):
-        """Execute immediate market sell order for VOO long exit."""
-        # Use Nautilus's close_position method if available, otherwise use market order
-        positions = self.cache.positions_open(venue=None, instrument_id=self.voo_instrument)
-        
-        if not positions:
-            logger.warning("Cannot exit VOO: no positions to close")
+        if not main_instrument or not reverse_instrument:
+            self.log.error(f"Instruments not found: main={main_instrument}, reverse={reverse_instrument}")
+            self.stop()
             return
-            
-        # Try to close all VOO positions
-        for pos in positions:
-            if pos.side.name == 'LONG':
-                try:
-                    # Use the built-in close_position method
-                    self.close_position(pos)
-                    logger.info(f"Closed VOO position using close_position(): {pos.id} qty={pos.quantity}")
-                except AttributeError:
-                    # Fallback to manual market order
-                    order = self.order_factory.market(
-                        instrument_id=self.voo_instrument,
-                        order_side=OrderSide.SELL,
-                        quantity=pos.quantity,
-                    )
+        
+        # Subscribe to hourly + daily bars used by the strategy
+        self.subscribe_bars(self.bar_types["1min_main"])       # for order fills / tracking
+        self.subscribe_bars(self.bar_types["1min_reverse"])    # for order fills /
+        self.subscribe_bars(self.bar_types["60min_main"])      # for on_hour_bar logic / EMA
+        self.subscribe_bars(self.bar_types["60min_reverse"])   # reverse hourly for sizing/logic
+        self.subscribe_bars(self.bar_types["1day_main"])       # for daily checks
+        self.subscribe_bars(self.bar_types["1day_reverse"])    # for daily checks
+
+        # indicators
+        self.register_indicator_for_bars(self.bar_types["1day_main"], self.high_low_enter)
+        self.register_indicator_for_bars(self.bar_types["1day_main"], self.high_low_exit)
+        self.register_indicator_for_bars(self.bar_types["60min_main"], self.ema)
+
+    def on_1minute_bar(self, bar: Bar):
+        # Execute entries/exits on minute bars for better price reactivity (main symbol only)
+        if bar.bar_type.instrument_id != self.main_symbol:
+            return
+
+        # Ensure signals are ready
+        if not (self.ema.initialized and self.high_low_enter.initialized and self.high_low_exit.initialized):  # type: ignore
+            return
+
+        assert self.high_low_enter.value is not None and self.high_low_exit.value is not None
+        high_entry, low_entry = self.high_low_enter.value
+        high_exit, low_exit = self.high_low_exit.value
+
+        # Positions
+        main_pos: int = self.portfolio.net_position(self.main_symbol)  # type: ignore
+        reverse_pos: int = self.portfolio.net_position(self.reverse_symbol)  # type: ignore
+
+        # Exits first
+        if main_pos > 0 and float(bar.low) < float(low_exit):
+            order = self.order_factory.market(
+                self.main_symbol,
+                OrderSide.SELL,
+                Quantity.from_int(int(main_pos)),
+            )
+            self.submit_order(order)
+
+        if reverse_pos > 0 and float(bar.high) > float(high_exit):
+            order = self.order_factory.market(
+                self.reverse_symbol,
+                OrderSide.SELL,
+                Quantity.from_int(int(reverse_pos)),
+            )
+            self.submit_order(order)
+
+        # Entries (only when flat and regime agrees)
+        if main_pos == 0 and reverse_pos == 0:
+            balance = self.portfolio.account(self.venue).balance_total().as_double()  # type: ignore
+            if self._market_regime == 1 and float(bar.high) > float(high_entry):
+                px = float(bar.close)
+                qty = max(0, math.floor((balance * 0.95) / px))
+                if qty > 0:
+                    order = self.order_factory.market(self.main_symbol, OrderSide.BUY, Quantity.from_int(qty))
                     self.submit_order(order)
-                    logger.info(f"Closed VOO position using market order: {pos.id} qty={pos.quantity}")
-        
-        # Update position immediately in backtest since order executes immediately  
-        self.position = 0
-        logger.info(f"Executed MARKET SELL VOO EXIT - all long positions closed, position updated to FLAT")
-    
-    def _execute_market_sell_sh_exit(self):
-        """Execute immediate market sell order for SH short exit."""
-        # Use Nautilus's close_position method if available, otherwise use market order
-        positions = self.cache.positions_open(venue=None, instrument_id=self.sh_instrument)
-        
-        if not positions:
-            logger.warning("Cannot exit SH: no positions to close")
-            return
-            
-        # Try to close all SH positions
-        for pos in positions:
-            if pos.side.name == 'LONG':  # We buy SH to go short
-                try:
-                    # Use the built-in close_position method
-                    self.close_position(pos)
-                    logger.info(f"Closed SH position using close_position(): {pos.id} qty={pos.quantity}")
-                except AttributeError:
-                    # Fallback to manual market order
-                    order = self.order_factory.market(
-                        instrument_id=self.sh_instrument,
-                        order_side=OrderSide.SELL,
-                        quantity=pos.quantity,
-                    )
-                    self.submit_order(order)
-                    logger.info(f"Closed SH position using market order: {pos.id} qty={pos.quantity}")
-        
-        # Update position immediately in backtest since order executes immediately  
-        self.position = 0
-        logger.info(f"Executed MARKET SELL SH EXIT - all short positions closed, position updated to FLAT")
 
-    
-    def _get_actual_position_size(self, instrument_id) -> int:
-        """Get the actual position size from Nautilus cache for a specific instrument."""
-        if instrument_id is None:
-            return 0
-            
-        positions = self.cache.positions_open(venue=None, instrument_id=instrument_id)
-        total_size = 0
-        
-        if positions:
-            for pos in positions:
-                if pos.side.name == 'LONG':
-                    total_size += int(pos.quantity)
-                elif pos.side.name == 'SHORT':
-                    total_size -= int(pos.quantity)
-        
-        return total_size
-    
-    # Order cancellation no longer needed with immediate market orders
-    
-    def on_order_filled(self, event):
-        """Handle order fills."""
-        logger.info(f"Order filled: {event.client_order_id} - {event.last_qty} @ {event.last_px}")
-        
-        # Update position from actual Nautilus state
-        voo_position_size = self._get_actual_position_size(self.voo_instrument)
-        sh_position_size = self._get_actual_position_size(self.sh_instrument)
-        
-        if voo_position_size > 0:
-            self.position = 1
-            logger.info(f"📊 Position status: LONG VOO ({voo_position_size} shares)")
-        elif sh_position_size > 0:
-            self.position = -1
-            logger.info(f"📊 Position status: SHORT via SH ({sh_position_size} shares)")
-        else:
-            self.position = 0
-            logger.info(f"📊 Position status: FLAT")
-    
+            if self._market_regime == -1 and float(bar.low) < float(low_entry):
+                px = float(bar.close)
+                qty = max(0, math.floor((balance * 0.95) / px))
+                if qty > 0:
+                    order = self.order_factory.market(self.reverse_symbol, OrderSide.BUY, Quantity.from_int(qty))
+                    self.submit_order(order)
+
+
+    def on_hour_bar(self, bar: Bar):
+        if bar.bar_type.instrument_id != self.main_symbol:
+            return
+        if not self.ema.initialized:
+            return
+        self._market_regime = 1 if bar.close > self.ema.value else -1
+
+    def on_daily_bar(self, bar: Bar):
+        pass
+
     def on_stop(self):
-        """Called when the strategy is stopped."""
-        logger.info("BreakoutStrategy stopped")
-        logger.info(f"Indicator used: {self.indicator.name}")
-        logger.info(f"Total daily bars processed: {self._bar_count}")
-        logger.info(f"Final position: {self.position}")
-        
-        # Log final position and P&L
-        positions = self.cache.positions_open()
-        if positions:
-            for position in positions:
-                logger.info(f"Final position: {position}")
-        else:
-            logger.info("No open positions at end of backtest")
+        # Log final snapshot (may reflect pre-close state if fills are asynchronous)
+        print(f"main pos: {self.portfolio.net_position(self.main_symbol)}, px: {self.cache.bar(self.bar_types['1min_main']).close}")
+        print(f"reverse pos: {self.portfolio.net_position(self.reverse_symbol)}, px: {self.cache.bar(self.bar_types['1min_reverse']).close}")
+        print(f"Final Balances: {self.portfolio.account(self.venue).balance_total().as_double()}")
+
+    def on_order_filled(self, event: OrderFilled):
+        """Print account balance when a position has been fully closed.
+
+        We disallow more than one open position at a time (either main or reverse).
+        After a fill, if both instruments are flat, this indicates a position-close
+        trade has completed, so we print the current account balance (equity curve).
+        """
+        try:
+            main_pos = int(self.portfolio.net_position(self.main_symbol))  # type: ignore
+            reverse_pos = int(self.portfolio.net_position(self.reverse_symbol))  # type: ignore
+
+            # Only print when we're flat across both instruments (i.e., just closed)
+            if main_pos == 0 and reverse_pos == 0:
+                balance = self.portfolio.account(self.venue).balance_total().as_double()  # type: ignore
+                # print(f"Balance after close: {balance}")
+        except Exception as e:
+            # Don't let logging issues interrupt strategy flow
+            self.log.warning(f"on_order_filled balance print failed: {e}")
+
+    def on_bar(self, bar: Bar):
+        bar_spec = bar.bar_type.spec
+        match bar_spec.aggregation:
+            case BarAggregation.MINUTE:
+                if bar_spec.step == 1:
+                    self.on_1minute_bar(bar)
+            case BarAggregation.HOUR:
+                if bar_spec.step == 1:
+                    self.on_hour_bar(bar)
+            case BarAggregation.DAY:
+                if bar_spec.step == 1:
+                    self.on_daily_bar(bar)
+            case _:
+                self.log.warning(f"Unhandled bar aggregation: {bar.bar_type.spec.aggregation}")
