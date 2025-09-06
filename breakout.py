@@ -15,25 +15,54 @@ from typing import List
 
 class HighLowDailyHistIndicator(Indicator):
     initialized: bool = False
-    value: tuple[float, float] | None = None  # (high, low)
+    # (entry_high, entry_low, exit_high, exit_low)
+    value: tuple[Price, Price, Price, Price] | None = None
 
-    _highs: List[Price | None]
-    _lows: List[Price | None]
+    def __init__(
+        self,
+        enter_high_lookback: int,
+        enter_low_lookback: int,
+        exit_high_lookback: int,
+        exit_low_lookback: int,
+    ):
+        # Validate lookbacks
+        for name, lb in (
+            ("enter_high_lookback", enter_high_lookback),
+            ("enter_low_lookback", enter_low_lookback),
+            ("exit_high_lookback", exit_high_lookback),
+            ("exit_low_lookback", exit_low_lookback),
+        ):
+            if lb <= 0:
+                raise ValueError(f"{name} must be >= 1")
 
-    def __init__(self, lookback: int = 7):
-        if lookback <= 0:
-            raise ValueError("lookback must be >= 1")
+        self.enter_high_lookback = enter_high_lookback
+        self.enter_low_lookback = enter_low_lookback
+        self.exit_high_lookback = exit_high_lookback
+        self.exit_low_lookback = exit_low_lookback
 
-        self.lookback = lookback
-        self._highs = [None] * self.lookback
-        self._lows = [None] * self.lookback
-        self._next_idx = 0
+        self._max_lookback = max(
+            self.enter_high_lookback,
+            self.enter_low_lookback,
+            self.exit_high_lookback,
+            self.exit_low_lookback,
+        )
+
+        # Two fixed-size circular buffers (no per-bar allocations)
+        self._highs: List[Price | None] = [None] * self._max_lookback
+        self._lows: List[Price | None] = [None] * self._max_lookback
+        self._next_idx: int = 0
 
         self.initialized = False
         self.value = None
 
     def __repr__(self) -> str:
-        return f"HighLowDailyHistIndicator(lookback={self.lookback})"
+        return (
+            "HighLowDailyHistIndicator("
+            f"enter_high={self.enter_high_lookback}, "
+            f"enter_low={self.enter_low_lookback}, "
+            f"exit_high={self.exit_high_lookback}, "
+            f"exit_low={self.exit_low_lookback})"
+        )
 
     def handle_quote_tick(self, tick: QuoteTick) -> None:
         raise RuntimeError("HighLowDailyHistIndicator does not support quote ticks")
@@ -42,25 +71,51 @@ class HighLowDailyHistIndicator(Indicator):
         raise RuntimeError("HighLowDailyHistIndicator does not support trade ticks")
 
     def handle_bar(self, bar: Bar) -> None:
-        # Compute levels from the previous N complete days (exclude current day)
-        # by calculating before inserting the current bar into the buffer.
+        # Compute levels from the previous complete days (exclude current day)
+        # by calculating BEFORE inserting the current bar into the buffers.
         if self.initialized:
-            # type: ignore
-            self.value = (max(self._highs), min(self._lows))  # previous N days only
+            def max_last(n: int) -> Price:
+                idx = (self._next_idx - 1) % self._max_lookback
+                best = self._highs[idx]
+                # Scan previous n-1 elements
+                for _ in range(1, n):
+                    idx = (idx - 1) % self._max_lookback
+                    v = self._highs[idx]
+                    if v is not None and best is not None and v > best:
+                        best = v
+                # type: ignore
+                return best  # Price
 
-        # Insert current day's bar into the ring buffer for use on the NEXT day
+            def min_last(n: int) -> Price:
+                idx = (self._next_idx - 1) % self._max_lookback
+                best = self._lows[idx]
+                for _ in range(1, n):
+                    idx = (idx - 1) % self._max_lookback
+                    v = self._lows[idx]
+                    if v is not None and best is not None and v < best:
+                        best = v
+                # type: ignore
+                return best  # Price
+
+            entry_high = max_last(self.enter_high_lookback)
+            entry_low = min_last(self.enter_low_lookback)
+            exit_high = max_last(self.exit_high_lookback)
+            exit_low = min_last(self.exit_low_lookback)
+            self.value = (entry_high, entry_low, exit_high, exit_low)
+
+        # Insert current day's bar into the buffers for use on the NEXT day
         self._highs[self._next_idx] = bar.high
         self._lows[self._next_idx] = bar.low
 
-        # Initialize once we have filled the buffer (value becomes available next bar)
-        if not self.initialized and self._next_idx == self.lookback - 1:
+        # Initialize once we have filled the largest required window
+        if not self.initialized and self._next_idx == self._max_lookback - 1:
             self.initialized = True
-
-        self._next_idx = (self._next_idx + 1) % self.lookback
+        # Advance ring buffer index
+        self._next_idx = (self._next_idx + 1) % self._max_lookback
 
     def reset(self) -> None:
-        self._highs = [None] * self.lookback
-        self._lows = [None] * self.lookback
+        self._highs = [None] * self._max_lookback
+        self._lows = [None] * self._max_lookback
         self._next_idx = 0
         self.value = None
         self.initialized = False
@@ -142,11 +197,14 @@ class Breakout(Strategy):
         self._market_regime = 0  # -1 bearish, 0 neutral, 1 bullish based on hourly EMA
 
         self.ema = ExponentialMovingAverage(self.ema_lookback_hours, PriceType.LAST)
-        # Two lookback windows for now: entry and exit (applied to both sides).
-        entry_lookback = self.long_entry
-        exit_lookback = self.long_exit
-        self.high_low_enter = HighLowDailyHistIndicator(lookback=entry_lookback)
-        self.high_low_exit = HighLowDailyHistIndicator(lookback=exit_lookback)
+        # Four lookbacks: long/short entry and long/short exit
+        # Use a single indicator instance which computes all levels at once.
+        self.daily_levels = HighLowDailyHistIndicator(
+            enter_high_lookback=self.long_entry,   # long entry uses high breakout
+            enter_low_lookback=self.short_entry,   # short entry uses low breakdown
+            exit_high_lookback=self.short_exit,    # short exit if price > recent high
+            exit_low_lookback=self.long_exit,      # long exit if price < recent low
+        )
 
         # No per-instrument minute price tracking in simple NETTING mode
 
@@ -170,8 +228,7 @@ class Breakout(Strategy):
         self.subscribe_bars(self.bar_types["1day_reverse"])    # for daily checks
 
         # indicators
-        self.register_indicator_for_bars(self.bar_types["1day_main"], self.high_low_enter)
-        self.register_indicator_for_bars(self.bar_types["1day_main"], self.high_low_exit)
+        self.register_indicator_for_bars(self.bar_types["1day_main"], self.daily_levels)
         self.register_indicator_for_bars(self.bar_types["60min_main"], self.ema)
 
     def on_1minute_bar(self, bar: Bar):
@@ -180,12 +237,11 @@ class Breakout(Strategy):
             return
 
         # Ensure signals are ready
-        if not (self.ema.initialized and self.high_low_enter.initialized and self.high_low_exit.initialized):  # type: ignore
+        if not (self.ema.initialized and self.daily_levels.initialized):  # type: ignore
             return
 
-        assert self.high_low_enter.value is not None and self.high_low_exit.value is not None
-        high_entry, low_entry = self.high_low_enter.value
-        high_exit, low_exit = self.high_low_exit.value
+        assert self.daily_levels.value is not None
+        high_entry, low_entry, high_exit, low_exit = self.daily_levels.value
 
         # Positions
         main_pos: int = self.portfolio.net_position(self.main_symbol)  # type: ignore
