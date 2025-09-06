@@ -41,17 +41,6 @@ data_configs = [
         start_time=start_time,
         end_time=end_time
     ),
-    # 30 min
-    BacktestDataConfig(
-        catalog_path="./catalog",
-        data_cls=Bar,
-        instrument_ids=[InstrumentId.from_str("VOO.NASDAQ"), InstrumentId.from_str("SH.NASDAQ")], # type: ignore
-        bar_spec=BarSpecification(
-            30, BarAggregation.MINUTE, PriceType.LAST
-        ), # type: ignore
-        start_time=start_time,
-        end_time=end_time
-    ),
     # 1 day
     BacktestDataConfig(
         catalog_path="./catalog",
