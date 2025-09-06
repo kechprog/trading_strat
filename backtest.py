@@ -44,7 +44,7 @@ data_configs = [
 
 venue_conf = BacktestVenueConfig(
     "NASDAQ",
-    oms_type="HEDGING",
+    oms_type="NETTING",
     account_type="MARGIN",
     base_currency="USD",
     starting_balances=["1_000_000 USD"],
@@ -87,3 +87,5 @@ config = BacktestRunConfig(
 node = BacktestNode(configs=[config])
 
 results = node.run()
+
+print(results)

@@ -148,6 +148,8 @@ class BreakoutV2(Strategy):
         self.high_low_enter = HighLowDailyHistIndicator(lookback=entry_lookback)
         self.high_low_exit = HighLowDailyHistIndicator(lookback=exit_lookback)
 
+        # No per-instrument minute price tracking in simple NETTING mode
+
     def on_start(self):
         self.log.info(f"Starting BreakoutV2 strategy with config: {self.__dict__}")
 
@@ -173,7 +175,7 @@ class BreakoutV2(Strategy):
         self.register_indicator_for_bars(self.bar_types["60min_main"], self.ema)
 
     def on_1minute_bar(self, bar: Bar):
-        # Execute entries/exits on minute bars for better price reactivity
+        # Execute entries/exits on minute bars for better price reactivity (main symbol only)
         if bar.bar_type.instrument_id != self.main_symbol:
             return
 
@@ -216,7 +218,6 @@ class BreakoutV2(Strategy):
                     order = self.order_factory.market(self.main_symbol, OrderSide.BUY, Quantity.from_int(qty))
                     self.submit_order(order)
 
-
             if self._market_regime == -1 and float(bar.low) < float(low_entry):
                 px = float(bar.close)
                 qty = max(0, math.floor((balance * 0.95) / px))
@@ -236,8 +237,9 @@ class BreakoutV2(Strategy):
         pass
 
     def on_stop(self):
-        print(f"main pos: {self.portfolio.net_position(self.main_symbol)}")
-        print(f"reverse pos: {self.portfolio.net_position(self.reverse_symbol)}")
+        # Log final snapshot (may reflect pre-close state if fills are asynchronous)
+        print(f"main pos: {self.portfolio.net_position(self.main_symbol)}, px: {self.cache.bar(self.bar_types['1min_main']).close}")
+        print(f"reverse pos: {self.portfolio.net_position(self.reverse_symbol)}, px: {self.cache.bar(self.bar_types['1min_reverse']).close}")
         print(f"Final Balances: {self.portfolio.account(self.venue).balance_total().as_double()}")
 
     def on_bar(self, bar: Bar):
@@ -254,4 +256,3 @@ class BreakoutV2(Strategy):
                     self.on_daily_bar(bar)
             case _:
                 self.log.warning(f"Unhandled bar aggregation: {bar.bar_type.spec.aggregation}")
-                pass
