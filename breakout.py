@@ -74,7 +74,7 @@ class HighLowDailyHistIndicator(Indicator):
     def _reset(self) -> None:
         self.reset()
 
-class BreakoutV2Config(StrategyConfig, frozen=True):
+class BreakoutConfig(StrategyConfig, frozen=True):
     main_symbol: InstrumentId = InstrumentId.from_str("VOO.NASDAQ")
     reverse_symbol: InstrumentId = InstrumentId.from_str("SH.NASDAQ")
     long_entry: int = 1
@@ -85,8 +85,8 @@ class BreakoutV2Config(StrategyConfig, frozen=True):
     ema_lookback_hours: int = 50
 
 
-class BreakoutV2(Strategy):
-    def __init__(self, config: BreakoutV2Config):
+class Breakout(Strategy):
+    def __init__(self, config: BreakoutConfig):
         super().__init__(config)
 
         self.main_symbol = config.main_symbol

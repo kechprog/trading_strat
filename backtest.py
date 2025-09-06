@@ -57,8 +57,8 @@ bt_config = BacktestEngineConfig(
     logging=LoggingConfig("WARNING"),
     strategies=[
         ImportableStrategyConfig(
-            strategy_path="breakoutv2:BreakoutV2",
-            config_path="breakoutv2:BreakoutV2Config",
+            strategy_path="breakout:Breakout",
+            config_path="breakout:BreakoutConfig",
             config={
                 "main_symbol": InstrumentId.from_str("VOO.NASDAQ"),
                 "reverse_symbol": InstrumentId.from_str("SH.NASDAQ"),
