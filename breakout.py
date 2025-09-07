@@ -1,5 +1,4 @@
-from nautilus_trader.model.book import OrderBook
-from nautilus_trader.model.events.order import OrderAccepted, OrderCancelRejected, OrderCanceled, OrderDenied, OrderEmulated, OrderEvent, OrderExpired, OrderFilled, OrderInitialized, OrderModifyRejected, OrderPendingCancel, OrderPendingUpdate, OrderRejected, OrderReleased, OrderSubmitted, OrderTriggered, OrderUpdated
+from nautilus_trader.model.events.order import OrderFilled
 from nautilus_trader.trading.strategy import Strategy
 from nautilus_trader.model import BarType, InstrumentId, BarSpecification, Bar, QuoteTick, TradeTick, Price, Quantity
 from nautilus_trader.model.enums import BarAggregation, PriceType, OrderSide, AggregationSource
@@ -8,126 +7,32 @@ from nautilus_trader.core.data import Data
 from nautilus_trader.indicators.base.indicator import Indicator
 from nautilus_trader.core.datetime import unix_nanos_to_dt
 import math
-# import pandas as pd
 
 from typing import List
 from indicators.ema_indicator_nautilus import EMASignalIndicator
+from indicators.momentum_mean_reversion_nautilus import MomentumMeanReversionNautilusIndicator
+from indicators.high_low_hist import HighLowDailyHistIndicator
 
-class HighLowDailyHistIndicator(Indicator):
-    initialized: bool = False
-    # (entry_high, entry_low, exit_high, exit_low)
-    value: tuple[Price, Price, Price, Price] | None = None
 
-    def __init__(
-        self,
-        enter_high_lookback: int,
-        enter_low_lookback: int,
-        exit_high_lookback: int,
-        exit_low_lookback: int,
+
+def _build_indicator(indicator_type: str, params: dict) -> Indicator:
+    """Construct an Indicator instance from a type name and params.
+
+    Supported indicator_type values:
+    - "EMASignalIndicator" (alias: "ema", "EMA")
+    - "MomentumMeanReversionNautilusIndicator" (alias: "mmr", "momentum_mean_reversion")
+    """
+    name = (indicator_type or "").strip()
+    if name in ("EMASignalIndicator", "ema", "EMA"):
+        return EMASignalIndicator(**(params or {}))
+    if name in (
+        "MomentumMeanReversionNautilusIndicator",
+        "mmr",
+        "momentum_mean_reversion",
     ):
-        # Validate lookbacks
-        for name, lb in (
-            ("enter_high_lookback", enter_high_lookback),
-            ("enter_low_lookback", enter_low_lookback),
-            ("exit_high_lookback", exit_high_lookback),
-            ("exit_low_lookback", exit_low_lookback),
-        ):
-            if lb <= 0:
-                raise ValueError(f"{name} must be >= 1")
+        return MomentumMeanReversionNautilusIndicator(**(params or {}))
+    raise ValueError(f"Unknown indicator_type: {indicator_type}")
 
-        self.enter_high_lookback = enter_high_lookback
-        self.enter_low_lookback = enter_low_lookback
-        self.exit_high_lookback = exit_high_lookback
-        self.exit_low_lookback = exit_low_lookback
-
-        self._max_lookback = max(
-            self.enter_high_lookback,
-            self.enter_low_lookback,
-            self.exit_high_lookback,
-            self.exit_low_lookback,
-        )
-
-        # Two fixed-size circular buffers (no per-bar allocations)
-        self._highs: List[Price | None] = [None] * self._max_lookback
-        self._lows: List[Price | None] = [None] * self._max_lookback
-        self._next_idx: int = 0
-
-        self.initialized = False
-        self.value = None
-
-    def __repr__(self) -> str:
-        return (
-            "HighLowDailyHistIndicator("
-            f"enter_high={self.enter_high_lookback}, "
-            f"enter_low={self.enter_low_lookback}, "
-            f"exit_high={self.exit_high_lookback}, "
-            f"exit_low={self.exit_low_lookback})"
-        )
-
-    def handle_quote_tick(self, tick: QuoteTick) -> None:
-        raise RuntimeError("HighLowDailyHistIndicator does not support quote ticks")
-
-    def handle_trade_tick(self, tick: TradeTick) -> None:
-        raise RuntimeError("HighLowDailyHistIndicator does not support trade ticks")
-
-    def handle_bar(self, bar: Bar) -> None:
-        # Compute levels from the previous complete days (exclude current day)
-        # by calculating BEFORE inserting the current bar into the buffers.
-        if self.initialized:
-            def max_last(n: int) -> Price:
-                idx = (self._next_idx - 1) % self._max_lookback
-                best = self._highs[idx]
-                # Scan previous n-1 elements
-                for _ in range(1, n):
-                    idx = (idx - 1) % self._max_lookback
-                    v = self._highs[idx]
-                    if v is not None and best is not None and v > best:
-                        best = v
-                # type: ignore
-                return best  # Price
-
-            def min_last(n: int) -> Price:
-                idx = (self._next_idx - 1) % self._max_lookback
-                best = self._lows[idx]
-                for _ in range(1, n):
-                    idx = (idx - 1) % self._max_lookback
-                    v = self._lows[idx]
-                    if v is not None and best is not None and v < best:
-                        best = v
-                # type: ignore
-                return best  # Price
-
-            entry_high = max_last(self.enter_high_lookback)
-            entry_low = min_last(self.enter_low_lookback)
-            exit_high = max_last(self.exit_high_lookback)
-            exit_low = min_last(self.exit_low_lookback)
-            self.value = (entry_high, entry_low, exit_high, exit_low)
-
-        # Insert current day's bar into the buffers for use on the NEXT day
-        self._highs[self._next_idx] = bar.high
-        self._lows[self._next_idx] = bar.low
-
-        # Initialize once we have filled the largest required window
-        if not self.initialized and self._next_idx == self._max_lookback - 1:
-            self.initialized = True
-        # Advance ring buffer index
-        self._next_idx = (self._next_idx + 1) % self._max_lookback
-
-    def reset(self) -> None:
-        self._highs = [None] * self._max_lookback
-        self._lows = [None] * self._max_lookback
-        self._next_idx = 0
-        self.value = None
-        self.initialized = False
-
-    def _set_has_inputs(self, setting: bool) -> None:
-        raise NotImplementedError()
-
-    def _set_initialized(self, setting: bool) -> None:
-        self.initialized = setting
-
-    def _reset(self) -> None:
-        self.reset()
 
 class BreakoutConfig(StrategyConfig, frozen=True):
     main_symbol: InstrumentId = InstrumentId.from_str("VOO.NASDAQ")
@@ -138,6 +43,10 @@ class BreakoutConfig(StrategyConfig, frozen=True):
     short_exit: int = 7
 
     ema_lookback_hours: int = 50
+    # Indicator-agnostic parameters
+    indicator_bar: BarSpecification = BarSpecification(1, BarAggregation.HOUR, PriceType.LAST)  # which bar stream to feed the indicator
+    indicator_type: str = "EMASignalIndicator"
+    indicator_params: dict | None = None 
 
 
 class Breakout(Strategy):
@@ -152,60 +61,26 @@ class Breakout(Strategy):
         self.short_exit = config.short_exit
 
         self.ema_lookback_hours = config.ema_lookback_hours
+        self.indicator_bar = config.indicator_bar
 
         assert self.main_symbol.venue == self.reverse_symbol.venue, "Main and reverse symbols must be on the same venue(As of right now)"
         self.venue = config.main_symbol.venue
 
-        self.bar_types = {
-            "1min_main": BarType(
-                self.main_symbol,
-                BarSpecification(1, BarAggregation.MINUTE, PriceType.LAST),
-                aggregation_source=AggregationSource.EXTERNAL,
-            ),
-            "1min_reverse": BarType(
-                self.reverse_symbol,
-                BarSpecification(1, BarAggregation.MINUTE, PriceType.LAST),
-                aggregation_source=AggregationSource.EXTERNAL,
-            ),
-
-            "60min_main": BarType(
-                self.main_symbol,
-                BarSpecification(1, BarAggregation.HOUR, PriceType.LAST),
-                aggregation_source=AggregationSource.EXTERNAL,
-            ),
-            "60min_reverse": BarType(
-                self.reverse_symbol,
-                BarSpecification(1, BarAggregation.HOUR, PriceType.LAST),
-                aggregation_source=AggregationSource.EXTERNAL,
-            ),
-
-            "1day_main": BarType(
-                self.main_symbol,
-                BarSpecification(1, BarAggregation.DAY, PriceType.LAST),
-                aggregation_source=AggregationSource.EXTERNAL,
-            ),
-
-            "1day_reverse": BarType(
-                self.reverse_symbol,
-                BarSpecification(1, BarAggregation.DAY, PriceType.LAST),
-                aggregation_source=AggregationSource.EXTERNAL,
-            )
-        }
-
-        self.hist_daily = None
-        self.daily_live = None
-
-        self.ema = EMASignalIndicator(period=self.ema_lookback_hours)
-        # Four lookbacks: long/short entry and long/short exit
-        # Use a single indicator instance which computes all levels at once.
-        self.daily_levels = HighLowDailyHistIndicator(
-            enter_high_lookback=self.long_entry,   # long entry uses high breakout
-            enter_low_lookback=self.short_entry,   # short entry uses low breakdown
-            exit_high_lookback=self.short_exit,    # short exit if price > recent high
-            exit_low_lookback=self.long_exit,      # long exit if price < recent low
+        self.min_main = BarType(self.main_symbol, BarSpecification(1, BarAggregation.MINUTE, PriceType.LAST), AggregationSource.EXTERNAL)
+        self.min_reverse = BarType(self.reverse_symbol, BarSpecification(1, BarAggregation.MINUTE, PriceType.LAST), AggregationSource.EXTERNAL)
+        self.day_main = BarType(self.main_symbol, BarSpecification(1, BarAggregation.DAY, PriceType.LAST), AggregationSource.EXTERNAL)
+        
+        self.indicator: Indicator = _build_indicator(
+            config.indicator_type,
+            config.indicator_params # type: ignore
         )
-
-        # No per-instrument minute price tracking in simple NETTING mode
+        
+        self.daily_levels = HighLowDailyHistIndicator(
+            enter_high_lookback=self.long_entry,
+            enter_low_lookback=self.short_entry,
+            exit_high_lookback=self.short_exit,
+            exit_low_lookback=self.long_exit,
+        )
 
     def on_start(self):
         self.log.info(f"Starting BreakoutV2 strategy with config: {self.__dict__}")
@@ -218,25 +93,22 @@ class Breakout(Strategy):
             self.stop()
             return
         
-        # Subscribe to hourly + daily bars used by the strategy
-        self.subscribe_bars(self.bar_types["1min_main"])       # for order fills / tracking
-        self.subscribe_bars(self.bar_types["1min_reverse"])    # for order fills /
-        self.subscribe_bars(self.bar_types["60min_main"])      # for on_hour_bar logic / EMA
-        self.subscribe_bars(self.bar_types["60min_reverse"])   # reverse hourly for sizing/logic
-        self.subscribe_bars(self.bar_types["1day_main"])       # for daily checks
-        self.subscribe_bars(self.bar_types["1day_reverse"])    # for daily checks
+        # Subscribe to minute + daily bars used by the strategy
+        self.subscribe_bars(self.min_main)
+        self.subscribe_bars(self.min_reverse)
+        self.subscribe_bars(BarType(self.main_symbol, self.indicator_bar))
+        self.subscribe_bars(self.day_main)
 
-        # indicators
-        self.register_indicator_for_bars(self.bar_types["1day_main"], self.daily_levels)
-        self.register_indicator_for_bars(self.bar_types["60min_main"], self.ema)
+        # Register indicators for the relevant bar streams
+        self.register_indicator_for_bars(self.day_main, self.daily_levels)
+        self.register_indicator_for_bars(BarType(self.main_symbol, self.indicator_bar), self.indicator)
 
     def on_1minute_bar(self, bar: Bar):
-        # Execute entries/exits on minute bars for better price reactivity (main symbol only)
         if bar.bar_type.instrument_id != self.main_symbol:
             return
 
         # Ensure signals are ready
-        if not (self.ema.initialized and self.daily_levels.initialized):  # type: ignore
+        if not (self.indicator.initialized and self.daily_levels.initialized):  # type: ignore
             return
 
         assert self.daily_levels.value is not None
@@ -266,14 +138,14 @@ class Breakout(Strategy):
         # Entries (only when flat and regime agrees)
         if main_pos == 0 and reverse_pos == 0:
             balance = self.portfolio.account(self.venue).balance_total().as_double()  # type: ignore
-            if self.ema.value == 1 and float(bar.high) > float(high_entry):
+            if self.indicator.value == 1 and float(bar.high) > float(high_entry):
                 px = float(bar.close)
                 qty = max(0, math.floor((balance * 0.95) / px))
                 if qty > 0:
                     order = self.order_factory.market(self.main_symbol, OrderSide.BUY, Quantity.from_int(qty))
                     self.submit_order(order)
 
-            if self.ema.value == -1 and float(bar.low) < float(low_entry):
+            if self.indicator.value == -1 and float(bar.low) < float(low_entry):
                 px = float(bar.close)
                 qty = max(0, math.floor((balance * 0.95) / px))
                 if qty > 0:
@@ -283,14 +155,11 @@ class Breakout(Strategy):
     def on_daily_bar(self, bar: Bar):
         pass
 
-    def on_hour_bar(self, bar: Bar):
-        pass
-
     def on_stop(self):
         # Log final snapshot (may reflect pre-close state if fills are asynchronous)
-        print(f"main pos: {self.portfolio.net_position(self.main_symbol)}, px: {self.cache.bar(self.bar_types['1min_main']).close}")
-        print(f"reverse pos: {self.portfolio.net_position(self.reverse_symbol)}, px: {self.cache.bar(self.bar_types['1min_reverse']).close}")
-        print(f"Final Balances: {self.portfolio.account(self.venue).balance_total().as_double()}")
+        print(f"main pos: {self.portfolio.net_position(self.main_symbol)}, px: {self.cache.bar(self.min_main).close}")
+        print(f"reverse pos: {self.portfolio.net_position(self.reverse_symbol)}, px: {self.cache.bar(self.min_reverse).close}")
+        print(f"Final Balances: {self.portfolio.account(self.venue).balance_total().as_double()}") # type: ignore
 
     def on_order_filled(self, event: OrderFilled):
         """Print account balance when a position has been fully closed.
@@ -317,11 +186,3 @@ class Breakout(Strategy):
             case BarAggregation.MINUTE:
                 if bar_spec.step == 1:
                     self.on_1minute_bar(bar)
-            case BarAggregation.DAY:
-                if bar_spec.step == 1:
-                    self.on_daily_bar(bar)
-            case BarAggregation.HOUR:
-                if bar_spec.step == 1:
-                    self.on_hour_bar(bar)
-            case _:
-                self.log.warning(f"Unhandled bar aggregation: {bar.bar_type.spec.aggregation}")

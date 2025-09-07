@@ -67,6 +67,10 @@ bt_config = BacktestEngineConfig(
                 "long_exit": 7,
                 "short_exit": 7,
                 "ema_lookback_hours": 50,
+                # Use EMA signal indicator on hourly bars
+                "indicator_bar": BarSpecification(1, BarAggregation.HOUR, PriceType.LAST),
+                "indicator_type": "EMASignalIndicator",
+                "indicator_params": {"period": 50},
             },
         ),
         # ImportableStrategyConfig(
