@@ -4,7 +4,6 @@ from nautilus_trader.trading.strategy import Strategy
 from nautilus_trader.model import BarType, InstrumentId, BarSpecification, Bar, QuoteTick, TradeTick, Price, Quantity
 from nautilus_trader.model.enums import BarAggregation, PriceType, OrderSide, AggregationSource
 from nautilus_trader.config import StrategyConfig
-from nautilus_trader.indicators.average.ema import ExponentialMovingAverage
 from nautilus_trader.core.data import Data
 from nautilus_trader.indicators.base.indicator import Indicator
 from nautilus_trader.core.datetime import unix_nanos_to_dt
@@ -12,6 +11,7 @@ import math
 # import pandas as pd
 
 from typing import List
+from indicators.ema_indicator_nautilus import EMASignalIndicator
 
 class HighLowDailyHistIndicator(Indicator):
     initialized: bool = False
@@ -194,9 +194,8 @@ class Breakout(Strategy):
 
         self.hist_daily = None
         self.daily_live = None
-        self._market_regime = 0  # -1 bearish, 0 neutral, 1 bullish based on hourly EMA
 
-        self.ema = ExponentialMovingAverage(self.ema_lookback_hours, PriceType.LAST)
+        self.ema = EMASignalIndicator(period=self.ema_lookback_hours)
         # Four lookbacks: long/short entry and long/short exit
         # Use a single indicator instance which computes all levels at once.
         self.daily_levels = HighLowDailyHistIndicator(
@@ -267,29 +266,24 @@ class Breakout(Strategy):
         # Entries (only when flat and regime agrees)
         if main_pos == 0 and reverse_pos == 0:
             balance = self.portfolio.account(self.venue).balance_total().as_double()  # type: ignore
-            if self._market_regime == 1 and float(bar.high) > float(high_entry):
+            if self.ema.value == 1 and float(bar.high) > float(high_entry):
                 px = float(bar.close)
                 qty = max(0, math.floor((balance * 0.95) / px))
                 if qty > 0:
                     order = self.order_factory.market(self.main_symbol, OrderSide.BUY, Quantity.from_int(qty))
                     self.submit_order(order)
 
-            if self._market_regime == -1 and float(bar.low) < float(low_entry):
+            if self.ema.value == -1 and float(bar.low) < float(low_entry):
                 px = float(bar.close)
                 qty = max(0, math.floor((balance * 0.95) / px))
                 if qty > 0:
                     order = self.order_factory.market(self.reverse_symbol, OrderSide.BUY, Quantity.from_int(qty))
                     self.submit_order(order)
 
+    def on_daily_bar(self, bar: Bar):
+        pass
 
     def on_hour_bar(self, bar: Bar):
-        if bar.bar_type.instrument_id != self.main_symbol:
-            return
-        if not self.ema.initialized:
-            return
-        self._market_regime = 1 if bar.close > self.ema.value else -1
-
-    def on_daily_bar(self, bar: Bar):
         pass
 
     def on_stop(self):
@@ -323,11 +317,11 @@ class Breakout(Strategy):
             case BarAggregation.MINUTE:
                 if bar_spec.step == 1:
                     self.on_1minute_bar(bar)
-            case BarAggregation.HOUR:
-                if bar_spec.step == 1:
-                    self.on_hour_bar(bar)
             case BarAggregation.DAY:
                 if bar_spec.step == 1:
                     self.on_daily_bar(bar)
+            case BarAggregation.HOUR:
+                if bar_spec.step == 1:
+                    self.on_hour_bar(bar)
             case _:
                 self.log.warning(f"Unhandled bar aggregation: {bar.bar_type.spec.aggregation}")
