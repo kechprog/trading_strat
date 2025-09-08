@@ -12,7 +12,7 @@ from typing import List
 from indicators.ema_indicator_nautilus import EMASignalIndicator
 from indicators.momentum_mean_reversion_nautilus import MomentumMeanReversionNautilusIndicator
 from indicators.high_low_hist import HighLowDailyHistIndicator
-
+from indicators.renko_trend_nautilus import RenkoTrendNautilusIndicator
 
 
 def _build_indicator(indicator_type: str, params: dict) -> Indicator:
@@ -31,7 +31,8 @@ def _build_indicator(indicator_type: str, params: dict) -> Indicator:
         "momentum_mean_reversion",
     ):
         return MomentumMeanReversionNautilusIndicator(**(params or {}))
-    raise ValueError(f"Unknown indicator_type: {indicator_type}")
+    if name in ("RenkoTrendNautilusIndicator", "renko", "Renko"):
+        return RenkoTrendNautilusIndicator(**(params or {}))
 
 
 class BreakoutConfig(StrategyConfig, frozen=True):

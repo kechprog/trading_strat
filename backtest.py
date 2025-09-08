@@ -25,7 +25,7 @@ from nautilus_trader.persistence.config import DataCatalogConfig
 catalog = ParquetDataCatalog("./catalog")
 nasdaq_venue = Venue("NASDAQ")
 
-start_time = "2014-04-01"
+start_time = "2018-04-01"
 end_time = "2023-07-01"
 
 
@@ -63,29 +63,34 @@ bt_config = BacktestEngineConfig(
                 "reverse_symbol": InstrumentId.from_str("SH.NASDAQ"),
                 "long_entry": 2,
                 "short_entry": 2,
-                "long_exit": 8,
-                "short_exit": 6,
+                "long_exit": 4,
+                "short_exit": 5,
                 # Indicator settings
                 "indicator_bar": BarSpecification(1, BarAggregation.HOUR, PriceType.LAST),
-                # "indicator_type": "MomentumMeanReversionNautilusIndicator",
-                # "indicator_params": {
-                #     "reversion_window": 15,
-                #     "momentum_peak_threshold": 1.0,
-                #     "overbought_threshold": 2.5,
-                #     "entry_amplifier": 2.0,
-                #     "exit_amplifier": 1.5,
-                # },
-                "indicator_type": "EMA",
+                "indicator_type": "MomentumMeanReversionNautilusIndicator",
                 "indicator_params": {
-                    "period": 25,
-                }
-            },
+                    "reversion_window": 30,
+                    "momentum_peak_threshold": 1.0,
+                    "overbought_threshold": 2.5,
+                    "entry_amplifier": 2.0,
+                    "exit_amplifier": 1.5,
+                },
+                # "indicator_type": "EMA",
+                # "indicator_params": {
+                #     "period": 25,
+                # }
+                # "indicator_type": "Renko",
+                # "indicator_params": {
+                #     "method": "ATR",  # 'ATR' or 'Traditional'
+                #     "atr_period": 14,
+                #     "brick_size": 4.0,
+                #     "source": "close",  # 'close' or 'hl'
+                #     "reversal": 4,
+                #     "tick_size": None,
+                # },
+            }
         ),
-        # ImportableStrategyConfig(
-        #     strategy_path="breakout:BreakoutStrategy",
-        #     config_path="breakout:BreakoutConfig",
-        #     config={},
-        # )
+
     ],
     catalogs=[DataCatalogConfig(path="./catalog")],
 )
