@@ -47,8 +47,7 @@ venue_conf = BacktestVenueConfig(
     oms_type="NETTING",
     account_type="MARGIN",
     base_currency="USD",
-    starting_balances=["1_000_000 USD"],
-    # fill_model=FillModel(),
+    starting_balances=["100_000 USD"],
     bar_adaptive_high_low_ordering=False,
 )
 
@@ -62,15 +61,24 @@ bt_config = BacktestEngineConfig(
             config={
                 "main_symbol": InstrumentId.from_str("VOO.NASDAQ"),
                 "reverse_symbol": InstrumentId.from_str("SH.NASDAQ"),
-                "long_entry": 1,
-                "short_entry": 1,
-                "long_exit": 7,
-                "short_exit": 7,
-                "ema_lookback_hours": 50,
-                # Use EMA signal indicator on hourly bars
+                "long_entry": 2,
+                "short_entry": 2,
+                "long_exit": 8,
+                "short_exit": 6,
+                # Indicator settings
                 "indicator_bar": BarSpecification(1, BarAggregation.HOUR, PriceType.LAST),
-                "indicator_type": "EMASignalIndicator",
-                "indicator_params": {"period": 50},
+                # "indicator_type": "MomentumMeanReversionNautilusIndicator",
+                # "indicator_params": {
+                #     "reversion_window": 15,
+                #     "momentum_peak_threshold": 1.0,
+                #     "overbought_threshold": 2.5,
+                #     "entry_amplifier": 2.0,
+                #     "exit_amplifier": 1.5,
+                # },
+                "indicator_type": "EMA",
+                "indicator_params": {
+                    "period": 25,
+                }
             },
         ),
         # ImportableStrategyConfig(

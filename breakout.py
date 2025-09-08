@@ -42,7 +42,6 @@ class BreakoutConfig(StrategyConfig, frozen=True):
     long_exit: int = 7
     short_exit: int = 7
 
-    ema_lookback_hours: int = 50
     # Indicator-agnostic parameters
     indicator_bar: BarSpecification = BarSpecification(1, BarAggregation.HOUR, PriceType.LAST)  # which bar stream to feed the indicator
     indicator_type: str = "EMASignalIndicator"
@@ -59,22 +58,20 @@ class Breakout(Strategy):
         self.short_entry = config.short_entry
         self.long_exit = config.long_exit
         self.short_exit = config.short_exit
-
-        self.ema_lookback_hours = config.ema_lookback_hours
-        self.indicator_bar = config.indicator_bar
-
         assert self.main_symbol.venue == self.reverse_symbol.venue, "Main and reverse symbols must be on the same venue(As of right now)"
         self.venue = config.main_symbol.venue
 
         self.min_main = BarType(self.main_symbol, BarSpecification(1, BarAggregation.MINUTE, PriceType.LAST), AggregationSource.EXTERNAL)
         self.min_reverse = BarType(self.reverse_symbol, BarSpecification(1, BarAggregation.MINUTE, PriceType.LAST), AggregationSource.EXTERNAL)
         self.day_main = BarType(self.main_symbol, BarSpecification(1, BarAggregation.DAY, PriceType.LAST), AggregationSource.EXTERNAL)
-        
+
+
+        self.indicator_bar = config.indicator_bar
         self.indicator: Indicator = _build_indicator(
             config.indicator_type,
             config.indicator_params # type: ignore
         )
-        
+
         self.daily_levels = HighLowDailyHistIndicator(
             enter_high_lookback=self.long_entry,
             enter_low_lookback=self.short_entry,
@@ -107,12 +104,18 @@ class Breakout(Strategy):
         if bar.bar_type.instrument_id != self.main_symbol:
             return
 
-        # Ensure signals are ready
+        # Ensure signals are ready. Note that the daily levels indicator sets
+        # `initialized` once its lookback is filled, but `value` is only
+        # available from the NEXT daily bar. Guard on both.
         if not (self.indicator.initialized and self.daily_levels.initialized):  # type: ignore
             return
-
-        assert self.daily_levels.value is not None
+        if self.daily_levels.value is None:
+            return
         high_entry, low_entry, high_exit, low_exit = self.daily_levels.value
+
+        # Normalize indicator signal to a signed float so we can accept
+        # both discrete {-1, 1} and continuous signals.
+        signal = float(self.indicator.value)
 
         # Positions
         main_pos: int = self.portfolio.net_position(self.main_symbol)  # type: ignore
@@ -138,22 +141,19 @@ class Breakout(Strategy):
         # Entries (only when flat and regime agrees)
         if main_pos == 0 and reverse_pos == 0:
             balance = self.portfolio.account(self.venue).balance_total().as_double()  # type: ignore
-            if self.indicator.value == 1 and float(bar.high) > float(high_entry):
+            if signal > 0 and float(bar.high) > float(high_entry):
                 px = float(bar.close)
                 qty = max(0, math.floor((balance * 0.95) / px))
                 if qty > 0:
                     order = self.order_factory.market(self.main_symbol, OrderSide.BUY, Quantity.from_int(qty))
                     self.submit_order(order)
 
-            if self.indicator.value == -1 and float(bar.low) < float(low_entry):
+            if signal < 0 and float(bar.low) < float(low_entry):
                 px = float(bar.close)
                 qty = max(0, math.floor((balance * 0.95) / px))
                 if qty > 0:
                     order = self.order_factory.market(self.reverse_symbol, OrderSide.BUY, Quantity.from_int(qty))
                     self.submit_order(order)
-
-    def on_daily_bar(self, bar: Bar):
-        pass
 
     def on_stop(self):
         # Log final snapshot (may reflect pre-close state if fills are asynchronous)
