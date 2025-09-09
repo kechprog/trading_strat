@@ -25,8 +25,8 @@ from nautilus_trader.persistence.config import DataCatalogConfig
 catalog = ParquetDataCatalog("./catalog")
 nasdaq_venue = Venue("NASDAQ")
 
-start_time = "2018-04-01"
-end_time = "2023-07-01"
+start_time = "2018-01-01"
+end_time = "2020-01-01"
 
 
 data_configs = [

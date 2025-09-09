@@ -13,3 +13,4 @@ pathlib2
 # API and environment handling
 requests
 python-dotenv
+plotly

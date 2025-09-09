@@ -1,12 +1,23 @@
 from nautilus_trader.model.events.order import OrderFilled
 from nautilus_trader.trading.strategy import Strategy
-from nautilus_trader.model import BarType, InstrumentId, BarSpecification, Bar, QuoteTick, TradeTick, Price, Quantity
+from nautilus_trader.model import (
+    BarType,
+    InstrumentId,
+    BarSpecification,
+    Bar,
+    QuoteTick,
+    TradeTick,
+    Price,
+    Quantity,
+)
 from nautilus_trader.model.enums import BarAggregation, PriceType, OrderSide, AggregationSource
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.core.data import Data
 from nautilus_trader.indicators.base.indicator import Indicator
 from nautilus_trader.core.datetime import unix_nanos_to_dt
 import math
+from pathlib import Path
+import pandas as pd
 
 from typing import List
 from indicators.ema_indicator_nautilus import EMASignalIndicator
@@ -80,6 +91,11 @@ class Breakout(Strategy):
             exit_low_lookback=self.long_exit,
         )
 
+        # Per-minute debug rows for export on stop
+        self._minute_rows: list[dict] = []
+        # Trade event markers for visualization (entries/exits)
+        self._event_rows: list[dict] = []
+
     def on_start(self):
         self.log.info(f"Starting BreakoutV2 strategy with config: {self.__dict__}")
 
@@ -130,6 +146,15 @@ class Breakout(Strategy):
                 Quantity.from_int(int(main_pos)),
             )
             self.submit_order(order)
+            # Mark long exit event
+            self._event_rows.append({
+                "time": unix_nanos_to_dt(bar.ts_event).isoformat(),
+                "symbol": str(self.main_symbol),
+                "event_type": "exit_long",
+                "side": "SELL",
+                "qty": int(main_pos),
+                "price": float(bar.close),
+            })
 
         if reverse_pos > 0 and float(bar.high) > float(high_exit):
             order = self.order_factory.market(
@@ -138,6 +163,15 @@ class Breakout(Strategy):
                 Quantity.from_int(int(reverse_pos)),
             )
             self.submit_order(order)
+            # Mark short exit event (reverse instrument)
+            self._event_rows.append({
+                "time": unix_nanos_to_dt(bar.ts_event).isoformat(),
+                "symbol": str(self.reverse_symbol),
+                "event_type": "exit_short",
+                "side": "SELL",
+                "qty": int(reverse_pos),
+                "price": float(bar.close),
+            })
 
         # Entries (only when flat and regime agrees)
         if main_pos == 0 and reverse_pos == 0:
@@ -148,6 +182,15 @@ class Breakout(Strategy):
                 if qty > 0:
                     order = self.order_factory.market(self.main_symbol, OrderSide.BUY, Quantity.from_int(qty))
                     self.submit_order(order)
+                    # Mark long entry event
+                    self._event_rows.append({
+                        "time": unix_nanos_to_dt(bar.ts_event).isoformat(),
+                        "symbol": str(self.main_symbol),
+                        "event_type": "entry_long",
+                        "side": "BUY",
+                        "qty": int(qty),
+                        "price": float(px),
+                    })
 
             if signal < 0 and float(bar.low) < float(low_entry):
                 px = float(bar.close)
@@ -155,12 +198,54 @@ class Breakout(Strategy):
                 if qty > 0:
                     order = self.order_factory.market(self.reverse_symbol, OrderSide.BUY, Quantity.from_int(qty))
                     self.submit_order(order)
+                    # Mark short entry event (reverse instrument)
+                    self._event_rows.append({
+                        "time": unix_nanos_to_dt(bar.ts_event).isoformat(),
+                        "symbol": str(self.reverse_symbol),
+                        "event_type": "entry_short",
+                        "side": "BUY",
+                        "qty": int(qty),
+                        "price": float(px),
+                    })
+
+
+        ts = unix_nanos_to_dt(bar.ts_event)
+        balance_total = self.portfolio.account(self.venue).balance_total().as_double()  # type: ignore
+        main_pos_snapshot = int(self.portfolio.net_position(self.main_symbol))  # type: ignore
+        reverse_pos_snapshot = int(self.portfolio.net_position(self.reverse_symbol))  # type: ignore
+        indicator_val = float(self.indicator.value) if self.indicator.value else None
+
+        self._minute_rows.append(
+            {
+                "time": ts.isoformat(),
+                "open": float(bar.open),
+                "high": float(bar.high),
+                "low": float(bar.low),
+                "close": float(bar.close),
+                "balance_total": balance_total,
+                "position_main": main_pos_snapshot,
+                "position_reverse": reverse_pos_snapshot,
+                "indicator_value": indicator_val,
+            }
+        )
 
     def on_stop(self):
         # Log final snapshot (may reflect pre-close state if fills are asynchronous)
         print(f"main pos: {self.portfolio.net_position(self.main_symbol)}, px: {self.cache.bar(self.min_main).close}")
         print(f"reverse pos: {self.portfolio.net_position(self.reverse_symbol)}, px: {self.cache.bar(self.min_reverse).close}")
         print(f"Final Balances: {self.portfolio.account(self.venue).balance_total().as_double()}") # type: ignore
+
+        df = pd.DataFrame(self._minute_rows)
+        out_path = Path("backtest_1m_log.csv")
+        df.to_csv(out_path, index=False)
+        self.log.info(f"Exported per-minute log to {out_path}")
+
+        # Export trade events (entries/exits)
+        if self._event_rows:
+            ev = pd.DataFrame(self._event_rows)
+            out_path_ev = Path("backtest_events.csv")
+            ev.to_csv(out_path_ev, index=False)
+            self.log.info(f"Exported trade events to {out_path_ev}")
 
     def on_order_filled(self, event: OrderFilled):
         """Print account balance when a position has been fully closed.
@@ -169,17 +254,7 @@ class Breakout(Strategy):
         After a fill, if both instruments are flat, this indicates a position-close
         trade has completed, so we print the current account balance (equity curve).
         """
-        try:
-            main_pos = int(self.portfolio.net_position(self.main_symbol))  # type: ignore
-            reverse_pos = int(self.portfolio.net_position(self.reverse_symbol))  # type: ignore
-
-            # Only print when we're flat across both instruments (i.e., just closed)
-            if main_pos == 0 and reverse_pos == 0:
-                balance = self.portfolio.account(self.venue).balance_total().as_double()  # type: ignore
-                # print(f"Balance after close: {balance}")
-        except Exception as e:
-            # Don't let logging issues interrupt strategy flow
-            self.log.warning(f"on_order_filled balance print failed: {e}")
+        pass
 
     def on_bar(self, bar: Bar):
         bar_spec = bar.bar_type.spec
