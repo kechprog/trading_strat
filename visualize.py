@@ -84,14 +84,24 @@ def plot_equity_and_signals(
 
     # Ensure time ordering for correct cumulative calculations and plotting
     if "time" in df.columns:
-        # Convert to market timezone for plotting and rangebreaks
-        df["time_plot"] = df["time"]
-        df = df.sort_values("time_plot").reset_index(drop=True)
+        # Keep timestamps as-is; we'll optionally use categorical x made from them
+        df["time_dt"] = pd.to_datetime(df["time"], errors="coerce")
+        df = df.sort_values("time_dt").reset_index(drop=True)
+        # Categorical x: use only timestamps present in the log (no gaps)
+        if compress_time:
+            df["time_key"] = df["time_dt"].dt.strftime("%Y-%m-%d %H:%M")
+            x_key = "time_key"
+            xaxis_kwargs = dict(type="category")
+        else:
+            x_key = "time_dt"
+            xaxis_kwargs = {}
     else:
         raise KeyError("Expected 'time' column in log CSV")
 
     if events is not None and "time" in events.columns:
-        events["time_plot"] = events["time"]
+        events["time_dt"] = pd.to_datetime(events["time"], errors="coerce")
+        if compress_time:
+            events["time_key"] = events["time_dt"].dt.strftime("%Y-%m-%d %H:%M")
 
     # Prepare base figure with secondary y on the top row (for indicator if scales differ)
     fig = make_subplots(
@@ -108,7 +118,7 @@ def plot_equity_and_signals(
         raise KeyError(f"Column '{price_col}' not found in {log_csv}")
     fig.add_trace(
         go.Scatter(
-            x=df["time_plot"],
+            x=df[x_key],
             y=df[price_col],
             mode="lines",
             name="Price (close)",
@@ -126,7 +136,7 @@ def plot_equity_and_signals(
         df["indicator_cumsum"] = ind_series.cumsum()
         fig.add_trace(
             go.Scatter(
-                x=df["time_plot"],
+                x=df[x_key],
                 y=df["indicator_cumsum"],
                 mode="lines",
                 name="Indicator (cumsum)",
@@ -142,9 +152,9 @@ def plot_equity_and_signals(
     if events is not None and not events.empty:
         # Join main close for y-positioning of markers to align with price chart
         ev = events.merge(
-            df[["time_plot", price_col]].rename(columns={price_col: "main_close_at_event"}),
-            left_on="time_plot",
-            right_on="time_plot",
+            df[[x_key, price_col]].rename(columns={price_col: "main_close_at_event"}),
+            left_on=("time_key" if compress_time else "time_dt"),
+            right_on=x_key,
             how="left",
         )
 
@@ -162,7 +172,7 @@ def plot_equity_and_signals(
                 continue
             fig.add_trace(
                 go.Scatter(
-                    x=sub["time_plot"],
+                    x=sub[x_key],
                     y=sub["main_close_at_event"],
                     mode="markers",
                     name=f"{evt_type}",
@@ -192,7 +202,7 @@ def plot_equity_and_signals(
     if "balance_total" in df.columns:
         fig.add_trace(
             go.Scatter(
-                x=df["time_plot"],
+                x=df[x_key],
                 y=df["balance_total"],
                 mode="lines",
                 name="Equity (balance_total)",
@@ -221,13 +231,9 @@ def plot_equity_and_signals(
         hovermode="x unified",
         template="plotly_white",
     )
-    # Apply rangebreaks to compress non-trading time
+    # Use categorical x-axis when compress_time is enabled
     if compress_time:
-        rangebreaks = [
-            dict(bounds=[16, 9.5], pattern="hour"),  # Hide 16:00 -> 09:30
-            # dict(bounds=["sat", "sun"]),            # Hide weekends
-        ]
-        fig.update_xaxes(rangebreaks=rangebreaks)
+        fig.update_xaxes(type="category")
 
     fig.update_xaxes(title_text="Time", row=2, col=1)
     fig.update_yaxes(title_text="Price", row=1, col=1, secondary_y=False)
