@@ -32,19 +32,6 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 
-def _to_market_time(series: pd.Series, market_tz: str = "America/New_York") -> pd.Series:
-    """Convert timestamps to the given market timezone.
-
-    - If tz-naive: assume UTC, then convert to market_tz.
-    - If tz-aware: convert directly to market_tz.
-    Returns a tz-aware series in market_tz.
-    """
-    if series.dt.tz is None:
-        # Assume UTC for naive timestamps
-        series = series.dt.tz_localize("UTC")
-    return series.dt.tz_convert(pytz.timezone(market_tz))
-
-
 def _load_log_csv(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path)
     if "time" in df.columns:
@@ -80,7 +67,6 @@ def plot_equity_and_signals(
     price_col: str = "close",
     indicator_col: str = "indicator_value",
     compress_time: bool = True,
-    market_tz: str = "America/New_York",
 ) -> go.Figure:
     """Build and optionally render the 2-row figure.
 
@@ -99,13 +85,13 @@ def plot_equity_and_signals(
     # Ensure time ordering for correct cumulative calculations and plotting
     if "time" in df.columns:
         # Convert to market timezone for plotting and rangebreaks
-        df["time_plot"] = _to_market_time(df["time"], market_tz)
+        df["time_plot"] = df["time"]
         df = df.sort_values("time_plot").reset_index(drop=True)
     else:
         raise KeyError("Expected 'time' column in log CSV")
 
     if events is not None and "time" in events.columns:
-        events["time_plot"] = _to_market_time(events["time"], market_tz)
+        events["time_plot"] = events["time"]
 
     # Prepare base figure with secondary y on the top row (for indicator if scales differ)
     fig = make_subplots(
@@ -239,7 +225,7 @@ def plot_equity_and_signals(
     if compress_time:
         rangebreaks = [
             dict(bounds=[16, 9.5], pattern="hour"),  # Hide 16:00 -> 09:30
-            dict(bounds=["sat", "mon"]),            # Hide weekends
+            # dict(bounds=["sat", "sun"]),            # Hide weekends
         ]
         fig.update_xaxes(rangebreaks=rangebreaks)
 
