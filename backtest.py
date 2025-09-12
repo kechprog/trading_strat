@@ -62,32 +62,20 @@ bt_config = BacktestEngineConfig(
                 "main_symbol": InstrumentId.from_str("VOO.NASDAQ"),
                 "reverse_symbol": InstrumentId.from_str("SH.NASDAQ"),
                 "long_entry": 2,
-                "short_entry": 2,
+                "short_entry": 1,
                 "long_exit": 4,
-                "short_exit": 5,
+                "short_exit": 3,
                 # Indicator settings
                 "indicator_bar": BarSpecification(1, BarAggregation.HOUR, PriceType.LAST),
-                "indicator_type": "MomentumMeanReversionNautilusIndicator",
+
+                "indicator_type": "tdvs",
                 "indicator_params": {
-                    "reversion_window": 30,
-                    "momentum_peak_threshold": 1.0,
-                    "overbought_threshold": 2.5,
-                    "entry_amplifier": 2.0,
-                    "exit_amplifier": 1.5,
-                },
-                # "indicator_type": "EMA",
-                # "indicator_params": {
-                #     "period": 25,
-                # }
-                # "indicator_type": "Renko",
-                # "indicator_params": {
-                #     "method": "ATR",  # 'ATR' or 'Traditional'
-                #     "atr_period": 14,
-                #     "brick_size": 4.0,
-                #     "source": "close",  # 'close' or 'hl'
-                #     "reversal": 4,
-                #     "tick_size": None,
-                # },
+                    "long_term_period": 240,
+                    "short_term_period": 2,
+                    "volume_lookback": 310,
+                    "volume_spike_threshold": 0.83,
+                    "sensitivity": 6.0
+                }
             }
         ),
 

@@ -24,6 +24,7 @@ from indicators.ema_indicator_nautilus import EMASignalIndicator
 from indicators.momentum_mean_reversion_nautilus import MomentumMeanReversionNautilusIndicator
 from indicators.high_low_hist import HighLowDailyHistIndicator
 from indicators.renko_trend_nautilus import RenkoTrendNautilusIndicator
+from indicators.trend_div_vol_spike import TrendDivVolSpikeIndicator
 
 
 def _build_indicator(indicator_type: str, params: dict) -> Indicator:
@@ -32,6 +33,7 @@ def _build_indicator(indicator_type: str, params: dict) -> Indicator:
     Supported indicator_type values:
     - "EMASignalIndicator" (alias: "ema", "EMA")
     - "MomentumMeanReversionNautilusIndicator" (alias: "mmr", "momentum_mean_reversion")
+    - "TrendDivVolSpikeIndicator" (alias: "tdvs", "trend_div_vol_spike")
     """
     name = (indicator_type or "").strip()
     if name in ("EMASignalIndicator", "ema", "EMA"):
@@ -44,6 +46,8 @@ def _build_indicator(indicator_type: str, params: dict) -> Indicator:
         return MomentumMeanReversionNautilusIndicator(**(params or {}))
     if name in ("RenkoTrendNautilusIndicator", "renko", "Renko"):
         return RenkoTrendNautilusIndicator(**(params or {}))
+    if name in ("TrendDivVolSpikeIndicator", "tdvs", "trend_div_vol_spike"):
+        return TrendDivVolSpikeIndicator(**(params or {}))
 
 
 class BreakoutConfig(StrategyConfig, frozen=True):
@@ -139,7 +143,7 @@ class Breakout(Strategy):
         reverse_pos: int = self.portfolio.net_position(self.reverse_symbol)  # type: ignore
 
         # Exits first
-        if main_pos > 0 and float(bar.low) < float(low_exit):
+        if main_pos > 0 and (float(bar.low) < float(low_exit) or self.indicator.value < 0):
             order = self.order_factory.market(
                 self.main_symbol,
                 OrderSide.SELL,
@@ -156,7 +160,7 @@ class Breakout(Strategy):
                 "price": float(bar.close),
             })
 
-        if reverse_pos > 0 and float(bar.high) > float(high_exit):
+        if reverse_pos > 0 and (float(bar.high) > float(high_exit) or self.indicator.value > 0):
             order = self.order_factory.market(
                 self.reverse_symbol,
                 OrderSide.SELL,
